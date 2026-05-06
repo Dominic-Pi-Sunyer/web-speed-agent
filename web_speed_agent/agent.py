@@ -13,6 +13,7 @@ from .credentials import get_pair as _cred_get
 from .credentials import store_pair as _cred_store
 from .exceptions import AuthenticationError
 from .http_client import APIClient
+from .scrubber import scrub as _scrub_html
 
 
 class Agent:
@@ -34,7 +35,7 @@ class Agent:
         from web_speed_agent import Agent
 
         async def main():
-            agent = Agent(api_key="sk_...")
+            agent = Agent(api_key="wsp_...")
 
             async with agent.browser(session_name="amazon") as browser:
                 page = await browser.new_page()
@@ -107,15 +108,31 @@ class Agent:
 
     # ── Extraction ────────────────────────────────────────────────────────────
 
-    async def extract(self, html: str, page_type: str = "auto") -> dict[str, Any]:
+    async def extract(
+        self,
+        html: str,
+        page_type: str = "auto",
+        scrub: bool = True,
+    ) -> dict[str, Any]:
         """Send HTML to the Web Speed API for advanced structured extraction.
 
         60–85% more token-efficient than raw HTML. Returns page-type-aware
         structured data (article, product, listing, or generic).
 
+        Privacy: by default (``scrub=True``) the HTML is pre-processed locally
+        before transmission to strip CSRF tokens, session IDs, hidden form values,
+        and inline scripts — so those values never leave your machine. Visible
+        content (text, links, tables, headings) is unaffected.
+
+        The server processes HTML in-memory only. No raw HTML is ever stored,
+        logged, or cached. Only structured JSON is returned.
+
         Args:
             html: Raw HTML string (e.g. from ``page.content()``).
             page_type: "article", "product", "listing", or "auto" (server detects).
+            scrub: Strip session tokens and sensitive fields before sending.
+                   Default True. Set False only if you have already scrubbed
+                   the HTML yourself or the page has no sensitive data.
 
         Returns:
             Structured extraction result with ``engine: "advanced"`` marker.
@@ -132,6 +149,8 @@ class Agent:
             print(result["product"]["price"])
         """
         self._require_key()
+        if scrub:
+            html = _scrub_html(html)
         return await self._client.extract(html, page_type)
 
     async def map(self, url: str, js: bool = False) -> dict[str, Any]:

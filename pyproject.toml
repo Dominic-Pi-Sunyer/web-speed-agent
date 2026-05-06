@@ -7,7 +7,7 @@ name = "web-speed-agent"
 version = "0.1.0"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
-license = { file = "LICENSE", text = "GPL-3.0-or-later" }
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 keywords = ["web", "scraping", "extraction", "playwright", "ai", "agents"]
 classifiers = [
@@ -18,13 +18,12 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Internet :: WWW/HTTP :: Indexing/Searching",
+    "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
     "playwright>=1.40.0",
     "httpx>=0.24.0",
-    "pydantic>=2.0",
     "pyyaml>=6.0",
     "keyring>=24.0",
 ]
@@ -38,9 +37,8 @@ dev = [
 
 [project.urls]
 Homepage = "https://getwebspeed.io"
-Documentation = "https://docs.getwebspeed.io"
-Repository = "https://github.com/webspeed/web-speed-agent"
-Issues = "https://github.com/webspeed/web-speed-agent/issues"
+Repository = "https://github.com/Dominic-Pi-Sunyer/web-speed-agent"
+Issues = "https://github.com/Dominic-Pi-Sunyer/web-speed-agent/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

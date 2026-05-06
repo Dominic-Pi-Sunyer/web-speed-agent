@@ -545,12 +545,57 @@ Persisted browser sessions are stored in `~/.webspeed/sessions/<name>/storage.js
 
 ## Security
 
+### What leaves your machine
+
+When you call `agent.extract(html)`, the page HTML is sent to the Web Speed API for processing. Everything else stays local.
+
+| Data | Where it goes |
+|------|--------------|
+| Login credentials | Never leave your machine (system keychain only) |
+| Browser cookies / session | Never leave your machine (local Playwright) |
+| Page HTML | Sent over HTTPS to Web Speed API for extraction |
+| Extracted JSON | Returned to you |
+
+### HTML scrubbing (on by default)
+
+Before any HTML is transmitted, the SDK automatically scrubs it locally:
+
+- Inline `<script>` and `<style>` blocks removed
+- Hidden form fields with auth-related names (`csrf`, `token`, `nonce`, `session`, etc.) have their values blanked
+- Sensitive `<meta>` content attributes cleared
+- HTML comments removed
+
+Visible content — text, links, tables, headings, product data — is untouched.
+
+```python
+# Default: scrubbing is on
+result = await agent.extract(html)
+
+# Turn off only if the page has no sensitive data
+result = await agent.extract(html, scrub=False)
+
+# Or scrub manually and inspect before sending
+from web_speed_agent import scrub
+clean_html = scrub(raw_html)
+print(clean_html)  # inspect what will be sent
+result = await agent.extract(clean_html, scrub=False)
+```
+
+### Server-side data handling
+
+- **HTML processed in-memory only** — never written to disk, never logged, never cached
+- **Auth-gated pages never cached** — pages requiring login are explicitly excluded from the shared registry
+- **Usage logs store only**: a hash of your API key, a hash of the URL (or `"sdk-extract"`), timestamp, and detected page type — no content
+- **No raw HTML in error responses** — exceptions are sanitized before any error is returned
+
+### Other protections
+
 - **Credentials** stored in system keychain, never in files, never sent to servers
 - **Session files** written with `0o600` permissions (owner-only read/write)
 - **Config directory** created with `0o700` permissions
-- **TLS** always verified (`verify=True` on all HTTP calls)
-- **HTTPS enforced** — `server_url` must start with `https://`
-- **Path traversal prevention** — session names validated against allowlist
+- **TLS always verified** — `verify=True` on all HTTP calls, cannot be disabled
+- **HTTPS enforced** — `server_url` must start with `https://`, plain HTTP rejected
+- **Path traversal prevention** — session names validated against `[a-zA-Z0-9_-]` allowlist
 - **No credential logging** — passwords never appear in logs or error messages
 
 ---

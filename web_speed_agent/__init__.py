@@ -8,7 +8,7 @@ Quick start::
     from web_speed_agent import Agent
 
     async def main():
-        agent = Agent(api_key="sk_...")
+        agent = Agent(api_key="wsp_...")
 
         async with agent.browser(session_name="my_site") as browser:
             page = await browser.new_page()
@@ -21,6 +21,7 @@ Quick start::
 """
 
 from .agent import Agent
+from .scrubber import scrub
 from .exceptions import (
     APIError,
     AuthenticationError,
@@ -35,6 +36,7 @@ from .exceptions import (
 
 __all__ = [
     "Agent",
+    "scrub",
     "WebSpeedError",
     "AuthenticationError",
     "InsufficientCreditsError",
