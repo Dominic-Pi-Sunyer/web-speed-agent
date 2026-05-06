@@ -62,7 +62,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Get a free API key at [getwebspeed.io](https://getwebspeed.io).
+Get an API key at [getwebspeed.io](https://getwebspeed.io).
 
 ---
 
