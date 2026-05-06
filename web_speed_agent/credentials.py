@@ -7,12 +7,18 @@ Linux secret-tool) via the `keyring` library.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from .exceptions import CredentialError
 
 _SERVICE_PREFIX = "web-speed-agent"
+
+try:
+    import keyring
+    from keyring.errors import PasswordDeleteError as _PasswordDeleteError
+except ImportError:
+    raise ImportError(
+        "The 'keyring' package is required for credential storage. "
+        "Install it with: pip install keyring"
+    )
 
 
 def _service(site: str) -> str:
@@ -28,11 +34,6 @@ def store(site: str, username: str, password: str, overwrite: bool = False) -> N
         password: Password. Never sent to Web Speed servers.
         overwrite: If False, raises CredentialError if credential already exists.
     """
-    try:
-        import keyring
-    except ImportError:
-        raise CredentialError("keyring package not installed. Run: pip install keyring")
-
     service = _service(site)
     existing = keyring.get_password(service, username)
     if existing and not overwrite:
@@ -44,30 +45,16 @@ def store(site: str, username: str, password: str, overwrite: bool = False) -> N
 
 def get(site: str, username: str) -> str | None:
     """Retrieve password from keychain. Returns None if not found."""
-    try:
-        import keyring
-    except ImportError:
-        raise CredentialError("keyring package not installed. Run: pip install keyring")
-
     return keyring.get_password(_service(site), username)
 
 
 def get_pair(site: str) -> tuple[str, str] | None:
-    """Retrieve (username, password) stored under a site identifier.
-
-    Stores the username separately as metadata so we can retrieve it
-    without knowing it in advance.
-    """
-    try:
-        import keyring
-    except ImportError:
-        raise CredentialError("keyring package not installed. Run: pip install keyring")
-
-    # Username stored under a meta-key
-    username = keyring.get_password(_service(site), "__username__")
+    """Retrieve (username, password) stored under a site identifier."""
+    service = _service(site)
+    username = keyring.get_password(service, "__username__")
     if not username:
         return None
-    password = keyring.get_password(_service(site), username)
+    password = keyring.get_password(service, username)
     if not password:
         return None
     return username, password
@@ -75,11 +62,6 @@ def get_pair(site: str) -> tuple[str, str] | None:
 
 def store_pair(site: str, username: str, password: str, overwrite: bool = False) -> None:
     """Store (username, password) retrievable without knowing the username."""
-    try:
-        import keyring
-    except ImportError:
-        raise CredentialError("keyring package not installed. Run: pip install keyring")
-
     service = _service(site)
     existing = keyring.get_password(service, "__username__")
     if existing and not overwrite:
@@ -92,20 +74,14 @@ def store_pair(site: str, username: str, password: str, overwrite: bool = False)
 
 def delete(site: str) -> None:
     """Remove credentials for a site from keychain."""
-    try:
-        import keyring
-        from keyring.errors import PasswordDeleteError
-    except ImportError:
-        raise CredentialError("keyring package not installed. Run: pip install keyring")
-
     service = _service(site)
     username = keyring.get_password(service, "__username__")
     if username:
         try:
             keyring.delete_password(service, username)
-        except Exception:
+        except _PasswordDeleteError:
             pass
     try:
         keyring.delete_password(service, "__username__")
-    except Exception:
+    except _PasswordDeleteError:
         pass

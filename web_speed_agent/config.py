@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 import yaml
 
 _DEFAULT_SERVER_URL = "https://api.getwebspeed.io"
 _CONFIG_FILE = "config.yaml"
+
+
+def _secure_mkdir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def _secure_write(path: Path, content: str) -> None:
+    """Write file with owner-only permissions (0o600)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(content)
 
 
 class Config:
@@ -19,38 +32,48 @@ class Config:
         self._load()
 
     def _load(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        (self._dir / "sessions").mkdir(exist_ok=True)
-        (self._dir / "logs").mkdir(exist_ok=True)
+        _secure_mkdir(self._dir)
+        _secure_mkdir(self._dir / "sessions")
+        _secure_mkdir(self._dir / "logs")
 
         if self._file.exists():
+            # Warn if file is world-readable
+            mode = self._file.stat().st_mode
+            if mode & (stat.S_IRGRP | stat.S_IROTH):
+                import warnings
+                warnings.warn(
+                    f"Config file {self._file} is readable by others. "
+                    "Run: chmod 600 ~/.webspeed/config.yaml",
+                    UserWarning,
+                    stacklevel=3,
+                )
             with open(self._file) as f:
                 self._data = yaml.safe_load(f) or {}
 
     def _save(self) -> None:
-        with open(self._file, "w") as f:
-            yaml.dump(self._data, f, default_flow_style=False)
+        _secure_write(self._file, yaml.dump(self._data, default_flow_style=False))
 
     @property
     def api_key(self) -> str | None:
-        # Env var takes precedence
+        # Env var always takes precedence — preferred way to provide key
         return (
             os.getenv("WEBSPEED_API_KEY")
             or self._data.get("api", {}).get("key")
         )
 
-    @api_key.setter
-    def api_key(self, value: str) -> None:
-        self._data.setdefault("api", {})["key"] = value
-        self._save()
-
     @property
     def server_url(self) -> str:
-        return (
+        url = (
             os.getenv("WEBSPEED_SERVER_URL")
             or self._data.get("api", {}).get("server_url")
             or _DEFAULT_SERVER_URL
         )
+        if not url.startswith("https://"):
+            raise ValueError(
+                f"server_url must use HTTPS (got {url!r}). "
+                "API keys must not be transmitted over plain HTTP."
+            )
+        return url
 
     @property
     def headless(self) -> bool:

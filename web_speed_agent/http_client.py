@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import httpx
 
 from .exceptions import (
@@ -15,6 +17,15 @@ from .exceptions import (
 _USER_AGENT = "web-speed-agent/0.1.0"
 
 
+def _validate_url(url: str) -> None:
+    """Reject non-HTTP(S) URLs to prevent misuse."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"Only http:// and https:// URLs are supported (got {url!r})")
+    if not parsed.netloc:
+        raise ValueError(f"URL has no host: {url!r}")
+
+
 class APIClient:
     def __init__(self, api_key: str, server_url: str, timeout: int = 30) -> None:
         self._key = api_key
@@ -26,6 +37,7 @@ class APIClient:
                 "user-agent": _USER_AGENT,
             },
             timeout=timeout,
+            verify=True,  # Explicit: always verify TLS certificates
         )
 
     async def extract(self, html: str, page_type: str = "auto") -> dict:
@@ -44,6 +56,7 @@ class APIClient:
 
     async def map_url(self, url: str, js: bool = False) -> dict:
         """Call /v1/map directly (no local browser needed)."""
+        _validate_url(url)
         try:
             resp = await self._client.get(
                 f"{self._base}/v1/map",
@@ -74,7 +87,7 @@ class APIClient:
         if resp.status_code == 403:
             try:
                 msg = resp.json().get("message", "Insufficient credits or suspended key")
-            except Exception:
+            except (ValueError, KeyError):
                 msg = "Insufficient credits or suspended key"
             if "credit" in msg.lower():
                 raise InsufficientCreditsError(msg)
@@ -84,7 +97,7 @@ class APIClient:
         if resp.status_code >= 400:
             try:
                 msg = resp.json().get("message", resp.text)
-            except Exception:
+            except (ValueError, KeyError):
                 msg = resp.text
             raise APIError(resp.status_code, msg)
         return resp.json()

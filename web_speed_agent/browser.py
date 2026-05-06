@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import json
+import re
+import stat
+import warnings
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -11,6 +13,22 @@ from .exceptions import BrowserError, PlaywrightNotInstalledError
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page
+
+# Only alphanumeric, hyphens, underscores — prevents path traversal
+_SESSION_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _validate_session_name(name: str) -> None:
+    if not _SESSION_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid session_name {name!r}. Use only letters, digits, hyphens, underscores (max 64 chars)."
+        )
+
+
+def _secure_mkdir(path: Path) -> None:
+    """Create directory with owner-only permissions (0o700)."""
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
 
 
 class ManagedBrowser:
@@ -29,6 +47,8 @@ class ManagedBrowser:
         headless: bool,
         proxy: str | None = None,
     ) -> None:
+        if session_name is not None:
+            _validate_session_name(session_name)
         self._sessions_dir = sessions_dir
         self._session_name = session_name
         self._headless = headless
@@ -63,13 +83,19 @@ class ManagedBrowser:
         # Load persisted session if available
         if self._session_name:
             session_dir = self._sessions_dir / self._session_name
-            session_dir.mkdir(parents=True, exist_ok=True)
+            _secure_mkdir(session_dir)
             storage_file = session_dir / "storage.json"
             if storage_file.exists():
-                try:
-                    ctx_opts["storage_state"] = str(storage_file)
-                except Exception:
-                    pass
+                # Warn if file is world-readable (might have been created with wrong perms)
+                mode = storage_file.stat().st_mode
+                if mode & (stat.S_IRGRP | stat.S_IROTH):
+                    warnings.warn(
+                        f"Session file {storage_file} is readable by others. "
+                        "Consider deleting and re-creating it.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                ctx_opts["storage_state"] = str(storage_file)
 
         self._context = await self._browser.new_context(**ctx_opts)
         return self
@@ -83,12 +109,14 @@ class ManagedBrowser:
         # Save session state before closing
         if self._context and self._session_name:
             session_dir = self._sessions_dir / self._session_name
-            session_dir.mkdir(parents=True, exist_ok=True)
+            _secure_mkdir(session_dir)
             storage_file = session_dir / "storage.json"
             try:
                 await self._context.storage_state(path=str(storage_file))
-            except Exception:
-                pass
+                # Lock down the file after writing (contains auth cookies)
+                storage_file.chmod(0o600)
+            except (OSError, IOError) as exc:
+                warnings.warn(f"Failed to save session state: {exc}", UserWarning, stacklevel=2)
 
         if self._context:
             await self._context.close()
