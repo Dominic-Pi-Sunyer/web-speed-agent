@@ -1,5 +1,9 @@
 # web-speed-agent
 
+[![PyPI version](https://img.shields.io/pypi/v/web-speed-agent.svg)](https://pypi.org/project/web-speed-agent/)
+[![Python](https://img.shields.io/pypi/pyversions/web-speed-agent.svg)](https://pypi.org/project/web-speed-agent/)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 Local browser automation + [Web Speed API](https://getwebspeed.io) integration for authenticated web extraction.
 
 Point an AI agent at any website — including ones that require login — and get back clean, structured data. Credentials stay on your machine. Only extracted HTML goes to the server.
