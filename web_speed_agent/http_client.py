@@ -58,9 +58,9 @@ class APIClient:
         """Call /v1/map directly (no local browser needed)."""
         _validate_url(url)
         try:
-            resp = await self._client.get(
+            resp = await self._client.post(
                 f"{self._base}/v1/map",
-                params={"url": url, "js": str(js).lower()},
+                json={"url": url, "js": js},
             )
         except httpx.TimeoutException as exc:
             raise NetworkError(f"Request timed out after {self._timeout}s") from exc
@@ -72,7 +72,7 @@ class APIClient:
     async def account(self) -> dict:
         """Fetch account info (credits, tier, usage)."""
         try:
-            resp = await self._client.get(f"{self._base}/v1/account")
+            resp = await self._client.get(f"{self._base}/v1/usage")
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise NetworkError(str(exc)) from exc
         return self._raise_for_status(resp)
