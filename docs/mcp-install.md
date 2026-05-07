@@ -337,7 +337,7 @@ open_browser(browser="edge",    profile_path="auto")
 
 ### Chrome
 
-#### Profile mode (recommended)
+#### Profile mode 
 
 No debug port needed. The agent loads your Chrome profile (cookies, logins, sessions) and opens it in Playwright's Chromium — no Chrome window appears, but all your logged-in sessions are there and ready.
 
@@ -378,13 +378,25 @@ timeout /t 2 /nobreak >nul
 ```
 
 *Windows .bat file* — create `chrome-agent.bat` on your desktop:
+
+  Open Notepad (or any text editor like VS Code).
+Paste the following code exactly as shown:
 ```batch
 @echo off
+:: This kills any existing Chrome instances so the remote debugging port can take effect
 taskkill /F /IM chrome.exe /T 2>nul
-timeout /t 2 /nobreak >nul
-start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222```
 
+:: Give Windows a moment to actually close the processes
+timeout /t 2 /nobreak >nul
+
+:: Launch Chrome with the debugging flag
+:: The empty "" is a 'title' argument required by the start command when using quotes
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+echo Chrome Agent started on port 9222.
+pause
 ```
+Save as .bat file
+
 open_browser(browser="chrome", cdp_url="http://localhost:9222")
 ```
 
