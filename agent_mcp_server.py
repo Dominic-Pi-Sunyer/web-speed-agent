@@ -29,8 +29,11 @@ import json
 import os
 import platform
 import re
+import shutil
+import sqlite3
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +206,54 @@ def _get_browser_type(browser: str, pw: Any):
     )
 
 
+def _read_firefox_cookies(profile_dir: Path) -> list[dict]:
+    """Read cookies from Firefox's cookies.sqlite as a read-only snapshot.
+
+    Works whether or not Firefox is running — we copy the file to a temp
+    location first so we never touch or lock the real database.
+    Firefox cookies are not encrypted (unlike Chrome), so the values are
+    directly usable.
+    """
+    cookies_db = profile_dir / "cookies.sqlite"
+    if not cookies_db.exists():
+        return []
+
+    tmp = Path(tempfile.mktemp(suffix="_ff_cookies.sqlite"))
+    try:
+        shutil.copy2(str(cookies_db), str(tmp))
+        conn = sqlite3.connect(str(tmp))
+        try:
+            cursor = conn.execute(
+                "SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite "
+                "FROM moz_cookies"
+            )
+            same_site_map = {0: "None", 1: "Lax", 2: "Strict"}
+            cookies = []
+            for name, value, host, path, expiry, is_secure, is_http_only, same_site in cursor:
+                if not host or name is None:
+                    continue
+                cookies.append({
+                    "name": name,
+                    "value": value or "",
+                    "domain": host,
+                    "path": path or "/",
+                    "expires": int(expiry) if expiry and expiry > 0 else -1,
+                    "secure": bool(is_secure),
+                    "httpOnly": bool(is_http_only),
+                    "sameSite": same_site_map.get(same_site, "None"),
+                })
+            return cookies
+        finally:
+            conn.close()
+    except Exception:
+        return []
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _ok(data: dict[str, Any]) -> str:
     return json.dumps({"ok": True, **data}, ensure_ascii=False, indent=2)
 
@@ -370,7 +421,15 @@ async def open_browser(
             run_headless = headless if headless is not None else HEADLESS
 
             if bname == "firefox":
-                # ── Profile mode: Firefox ─────────────────────────────────────
+                # ── Firefox cookie-import mode ────────────────────────────────
+                # We do NOT open the profile directly with launch_persistent_context.
+                # Playwright's Firefox build is older than Firefox Nightly, so opening
+                # a Nightly profile triggers Firefox's downgrade-protection dialog and
+                # can corrupt bookmarks/history. Instead we:
+                #   1. Read cookies.sqlite from the profile (read-only copy — safe)
+                #   2. Launch a fresh Playwright Firefox context
+                #   3. Inject the cookies so all existing sessions are active
+                # Firefox cookies are not encrypted, so the values are directly usable.
                 resolved, resolve_desc = _resolve_firefox_profile(profile_path)
                 if resolved is None:
                     hint = (
@@ -383,35 +442,47 @@ async def open_browser(
                         "the full path to your profile folder:\n" + hint
                     )
 
-                try:
-                    _context = await engine.launch_persistent_context(
-                        str(resolved),
-                        headless=run_headless,
-                        viewport={"width": 1920, "height": 1080},
-                        args=["--remote-debugging-port=0"],
-                    )
-                except Exception as exc:
-                    return _err(
-                        f"Could not launch Firefox with profile '{resolved}': {exc}\n\n"
-                        "Make sure Firefox is fully closed (Cmd+Q on Mac) before calling this."
-                    )
+                ff_cookies = _read_firefox_cookies(resolved)
 
+                try:
+                    _browser = await engine.launch(headless=run_headless)
+                except Exception as exc:
+                    return _err(f"Could not launch Firefox: {exc}")
+
+                _context = await _browser.new_context(
+                    user_agent=_UA_FIREFOX,
+                    viewport={"width": 1920, "height": 1080},
+                    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
                 await _context.add_init_script(_STEALTH_INIT)
+
+                # Import cookies — try bulk first, then one-by-one to skip bad entries
+                imported = 0
+                if ff_cookies:
+                    try:
+                        await _context.add_cookies(ff_cookies)
+                        imported = len(ff_cookies)
+                    except Exception:
+                        for cookie in ff_cookies:
+                            try:
+                                await _context.add_cookies([cookie])
+                                imported += 1
+                            except Exception:
+                                pass
+
                 _page = await _context.new_page()
-                _browser = None
                 _session_name = None
                 _cdp_mode = False
-                _persistent_ctx = True
+                _persistent_ctx = False  # regular browser launch, not persistent context
 
                 return _ok({
-                    "message": f"Firefox launched with profile: {resolved.name}",
+                    "message": f"Firefox ready — {imported} cookies imported from profile '{resolved.name}'.",
                     "browser": "firefox",
                     "profile": str(resolved),
+                    "cookies_imported": imported,
                     "note": (
-                        "Your Firefox profile data (logins, cookies) is loaded. "
-                        "Playwright ships a Firefox Nightly build, so the browser window "
-                        "will show 'Firefox Nightly' — this is normal and expected. "
-                        "If the wrong profile loaded, pass the full profile path explicitly."
+                        "Your Firefox login cookies are loaded (profile is read-only — never modified). "
+                        "Playwright uses its own Firefox build which appears as 'Firefox Nightly' — expected."
                     ),
                 })
 

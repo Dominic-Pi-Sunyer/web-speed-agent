@@ -385,32 +385,28 @@ open_browser(browser="chrome", cdp_url="http://localhost:9222")
 
 ### Firefox
 
-Firefox does not support CDP connections in Playwright. It uses **profile mode only** — the agent loads your existing Firefox profile so all your logins and cookies are there.
+Firefox does not support CDP. The agent uses **cookie import mode** — it reads your Firefox cookies directly from the profile database (read-only, your real profile is never touched or modified), then injects them into a fresh browser session. You'll be logged into every site you were logged into in Firefox.
 
-> **Important:** Playwright ships its own Firefox Nightly build as the automation engine. The browser window will show "Firefox Nightly" — this is always the case with Playwright and is not a misconfiguration. Your real Firefox logins and cookies from your standard Firefox profile are loaded and fully functional. The "Nightly" label is cosmetic only.
+> **"Firefox Nightly" in the title bar** — Playwright ships its own Firefox Nightly build. The browser will always show "Firefox Nightly". This is a Playwright limitation and does not affect functionality — your cookies and sessions work regardless.
 
 **Step 0 — One-time Playwright setup** (only needed once):
 ```bash
 playwright install firefox
 ```
 
-**Step 1 — Quit Firefox completely** (Cmd+Q on Mac, not just close the window).
+**Step 1 — Firefox can be open or closed** — cookies are read from the profile database file directly, so it doesn't matter.
 
-Your logins are not lost — they are stored in your Firefox profile folder on disk.
-
-**Step 2 — Tell the agent to launch Firefox with your profile:**
+**Step 2 — Tell the agent to load your Firefox cookies:**
 ```
 open_browser(browser="firefox", profile_path="auto")
 ```
 
-`profile_path="auto"` reads your Firefox `profiles.ini` and picks the standard Firefox profile, deliberately skipping any profiles with "nightly" or "dev-edition" in their path. It returns the profile name in the response so you can verify it found the right one.
+`profile_path="auto"` finds your standard Firefox profile automatically (skipping Nightly/Dev Edition profiles). The response shows how many cookies were imported and which profile was used.
 
-If it still picks the wrong profile, find your profile folders here:
+If it finds the wrong profile, pass the path explicitly:
+- **macOS:** `~/Library/Application Support/Firefox/Profiles/` — subfolder ending in `.default-release`
+- **Windows:** `%APPDATA%\Mozilla\Firefox\Profiles\` — subfolder ending in `.default-release`
 
-- **macOS:** `~/Library/Application Support/Firefox/Profiles/`
-- **Windows:** `%APPDATA%\Mozilla\Firefox\Profiles\`
-
-Each subfolder is a separate profile. Standard Firefox profiles typically end in `.default-release`; Nightly profiles end in `.default-nightly`. Pass the full path to a specific one:
 ```
 open_browser(browser="firefox", profile_path="~/Library/Application Support/Firefox/Profiles/abc123.default-release")
 ```
@@ -636,24 +632,28 @@ If still failing:
 
 **Firefox opens a new window instead of using my existing session**
 
-Firefox does not support CDP connections in Playwright, so the `cdp_url` approach used for Chrome and Edge does not work with Firefox. Use profile mode instead:
+Firefox does not support CDP. Use cookie import mode instead — it reads your login cookies directly from the Firefox profile database (your profile is never modified):
 
 ```
 open_browser(browser="firefox", profile_path="auto")
 ```
 
-This launches Firefox with your existing profile (all logins and cookies intact). Firefox must be fully closed first (Cmd+Q on Mac).
+Firefox does not need to be closed first.
 
-**Firefox always opens as "Firefox Nightly"**
+**"You've launched an older version of Firefox" dialog appeared**
 
-This is expected and unavoidable — Playwright ships a Firefox Nightly build as its bundled automation engine. The "Firefox Nightly" label comes from the Playwright binary, not from your profile. Your actual Firefox profile data (logins, cookies, bookmarks) is still loaded correctly from your standard Firefox profile. There is no fix; this is a Playwright limitation.
+This happened with the old approach (opening the profile directly). The current cookie-import method does not open the profile with Playwright at all — this dialog will no longer appear.
 
-**Firefox profile auto-detection picks the wrong profile**
+**Firefox always shows "Firefox Nightly" in the title bar**
 
-`profile_path="auto"` skips profiles with "nightly" or "dev-edition" in the path and prefers `.default-release` profiles. If it still picks the wrong one, the response includes the profile folder name — check it. Then pass the path explicitly:
+Playwright ships a Firefox Nightly build as its automation engine. This label is cosmetic and unavoidable — it is a Playwright limitation. Your actual Firefox login cookies are imported and your sessions work normally.
 
-- macOS: `~/Library/Application Support/Firefox/Profiles/` — find the subfolder ending in `.default-release`
-- Windows: `%APPDATA%\Mozilla\Firefox\Profiles\` — find the subfolder ending in `.default-release`
+**Firefox profile auto-detection picks the wrong profile / 0 cookies imported**
+
+`profile_path="auto"` prefers `.default-release` profiles and skips Nightly/Dev Edition. The response shows which profile was found and how many cookies were imported. If it's wrong, pass the path explicitly:
+
+- macOS: `~/Library/Application Support/Firefox/Profiles/` — subfolder ending in `.default-release`
+- Windows: `%APPDATA%\Mozilla\Firefox\Profiles\` — subfolder ending in `.default-release`
 
 ```
 open_browser(browser="firefox", profile_path="~/Library/Application Support/Firefox/Profiles/abc123.default-release")
