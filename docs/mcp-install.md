@@ -24,32 +24,70 @@ The AI handles the login, navigation, and data extraction. You get clean structu
 
 | Requirement | Notes |
 |-------------|-------|
-| Python 3.10 or later | Check: `python --version` (Windows) or `python3 --version` (Mac/Linux) |
+| Python 3.10 or later | Check: `python3 --version`. **macOS:** Don't use CommandLineTools Python (usually too old). Install via Homebrew (`brew install python@3.13`) or [python.org](https://www.python.org/downloads/). |
 | pip | Comes with Python |
 | Web Speed API key | [getwebspeed.io](https://getwebspeed.io) |
+
+**Note:** The `web-speed-agent` package is currently in early release. If you're installing for local development or testing, follow the "Local development install" section below. For production, wait for the PyPI release.
+
+---
+
+## Local development install
+
+If you have the source code checked out locally:
+
+**macOS / Linux:**
+```bash
+pip3 install -e "/path/to/web-speed-agent[mcp]"
+playwright install chromium
+```
+
+**Windows:**
+```batch
+pip install -e "C:/path/to/web-speed-agent[mcp]"
+python -m playwright install chromium
+```
+
+Replace the path with wherever you cloned or downloaded the repo. The `-e` flag installs in "editable" mode so code changes take effect immediately.
+
+---
 
 ---
 
 ## Step 1 — Install the package
 
 **macOS / Linux:**
+
+Modern Python installations require a virtual environment. Open Terminal and run:
+
 ```bash
-pip3 install "web-speed-agent[mcp]"
+python3 -m venv ~/web-speed-agent-env
+source ~/web-speed-agent-env/bin/activate
+pip install web-speed-agent
+pip install mcp
 playwright install chromium
 ```
+
+This creates an isolated environment at `~/web-speed-agent-env`. Note the path — you'll need it when configuring Claude Desktop (see Step 3).
+
+> **Common mistake:** Don't run `python3 pip3 install ...` — just use `pip install ...` directly (after activating the venv).
+> 
+> **Alternative (if you prefer no venv):** You can use `pipx install web-speed-agent` but you'll still need to install `mcp` and `playwright` separately.
 
 **Windows — IMPORTANT: Use the full Python path**
 
 Open **Command Prompt** (not PowerShell) and run these commands. Replace the path with your actual Python location (find it with `where python`):
 
 ```batch
-C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install "web-speed-agent[mcp]"
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install --upgrade pip
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install web-speed-agent
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install mcp
 C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m playwright install chromium
 ```
 
 > **Why the full path?** Windows has multiple Python versions, and `python` or `python3` commands can pick the wrong one or fail. Using the full path ensures you're installing into the correct Python version.
-
-The `[mcp]` extra installs the MCP SDK that the server needs to talk to Claude Desktop and other AI clients.
+>
+> **Upgrade pip first:** Old pip versions (pre-2022) may have stale caches. Upgrade with `--upgrade pip` to get the latest package index.
 
 ---
 
@@ -79,11 +117,14 @@ Open Claude Desktop, then go to **Settings → Developer → Edit Config**.
 This opens the config file in your default text editor. Add the `web-speed-agent` block shown below. If you already have other MCP servers, add it inside the existing `mcpServers` block — don't replace what's already there.
 
 **macOS / Linux:**
+
+If you created a virtual environment (recommended), use the Python from inside it:
+
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
-      "command": "python3",
+      "command": "/Users/yourname/web-speed-agent-env/bin/python",
       "args": ["/Users/yourname/tools/agent_mcp_server.py"],
       "env": {
         "WEBSPEED_API_KEY": "wsp_your_key_here"
@@ -91,6 +132,11 @@ This opens the config file in your default text editor. Add the `web-speed-agent
     }
   }
 }
+```
+
+If you installed globally instead (not recommended), use:
+```json
+"command": "python3"
 ```
 
 **Windows — IMPORTANT: Use the full Python path for `command`**
@@ -247,6 +293,45 @@ to:
 
 Get your exact Python path by running `where python` in Command Prompt. Then use the **full path** in your config — this is required on Windows.
 
+**"externally-managed-environment" (Mac/Linux)**
+Modern Python installations (especially from Homebrew) prevent pip from installing globally. Use a virtual environment:
+
+```bash
+python3 -m venv ~/web-speed-agent-env
+source ~/web-speed-agent-env/bin/activate
+pip install web-speed-agent
+pip install mcp
+playwright install chromium
+```
+
+Then in Claude Desktop config, use the path to the venv Python:
+```json
+"command": "/Users/yourname/web-speed-agent-env/bin/python"
+```
+
+**"Requires-Python >=3.10" or "No matching distribution found" (Mac/Linux)**
+You're using Python < 3.10. Check with `python3 --version`. On macOS, CommandLineTools Python is often too old.
+
+**Fix:** Install a proper Python 3.10+:
+
+**Via Homebrew (recommended):**
+```bash
+brew install python@3.13
+python3.13 -m pip install web-speed-agent
+python3.13 -m pip install mcp
+python3.13 -m playwright install chromium
+```
+
+**Or from [python.org](https://www.python.org/downloads/):**
+Download Python 3.13, then use:
+```bash
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m pip install web-speed-agent
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m pip install mcp
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3 -m playwright install chromium
+```
+
+Don't rely on CommandLineTools Python — it has outdated versions and permission issues.
+
 **"No module named 'mcp'"**
 The MCP SDK wasn't installed. Re-run the install with the `[mcp]` extra using the **same Python** that your config's `command` field points to.
 
@@ -280,6 +365,28 @@ You can find the exact path by running `where python` in a Command Prompt.
 The package isn't installed in the Python that the MCP server is running under. Confirm which Python you're using with `where python` (Windows) or `which python3` (Mac/Linux), then use that full path as the `command` in your config:
 ```json
 "command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe"
+```
+
+**"No matching distribution found for web-speed-agent[mcp]"**
+The optional `[mcp]` dependency isn't available on PyPI yet. Install separately:
+```bash
+pip3 install web-speed-agent
+pip3 install mcp
+```
+
+Also upgrade pip first to ensure you have the latest package index:
+```bash
+pip3 install --upgrade pip
+```
+
+**"can't open file '/Users/.../ pip3'" (Mac/Linux)**
+You likely ran `python3 pip3 install ...` instead of just `pip3 install ...`. The correct syntax is:
+```bash
+pip3 install web-speed-agent
+```
+Or if `pip3` is not found:
+```bash
+python3 -m pip install web-speed-agent
 ```
 
 **Playwright browser won't launch**
