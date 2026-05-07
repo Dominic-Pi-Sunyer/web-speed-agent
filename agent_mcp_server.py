@@ -313,21 +313,25 @@ async def store_credential(site: str, username: str, password: str) -> str:
 
 @mcp.tool()
 async def setup_browser(browser: str = "chrome") -> str:
-    """Install a wrapper so Chrome or Edge always starts with remote debugging enabled.
+    """Set up Chrome or Edge for agent use (macOS).
 
-    Run this ONCE. After setup, just open the browser normally (use the new
-    shortcut or alias) and the agent can always open a new tab in your real
-    browser without killing/relaunching anything.
+    Run this ONCE (with your browser closed). It:
+      1. Creates a dedicated agent profile at ~/.webspeed/chrome-debug/ —
+         a non-default user data directory, which is required by Chrome before
+         it will open the remote debugging port.
+      2. Copies your existing Chrome cookies into that profile so you are
+         already logged into all your sites when the agent opens the browser.
+      3. Installs ~/bin/chrome-agent — a shell script that always launches
+         Chrome with the agent profile and the debug port enabled.
+      4. Adds 'chrome-agent' as a shell alias in ~/.zshrc.
 
-    What this does (macOS):
-      - Creates ~/bin/chrome-agent (or edge-agent) — a shell script that
-        kills any existing instance and relaunches with --remote-debugging-port=9222
-      - Adds a shell alias to ~/.zshrc so you can type 'chrome-agent' in Terminal
-      - Prints instructions for replacing the Dock icon
+    After setup:
+      - Type 'chrome-agent' in Terminal to open Chrome (do this once)
+      - Tell the agent: open_browser(browser="chrome", cdp_url="http://localhost:9222")
+      - The agent opens a new tab in your real Chrome with all your logins active
 
-    After setup, open the browser with the new shortcut once. From then on,
-    open_browser(browser="chrome", cdp_url="http://localhost:9222") opens a
-    real new tab in your existing browser window every time.
+    Re-run setup_browser() any time you want to sync fresh cookies from your
+    main Chrome profile into the agent profile (close Chrome first).
 
     Args:
         browser: "chrome" (default) or "edge".
@@ -338,26 +342,27 @@ async def setup_browser(browser: str = "chrome") -> str:
     if system != "Darwin":
         return _err(
             "setup_browser currently supports macOS only.\n\n"
-            "On Windows, create a .bat file shortcut (see the install docs):\n"
-            "  @echo off\n"
-            "  taskkill /F /IM chrome.exe /T 2>nul\n"
-            "  timeout /t 2 /nobreak >nul\n"
-            '  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
+            "On Windows: create a .bat shortcut that passes --user-data-dir and\n"
+            "--remote-debugging-port=9222 — see the install docs for details."
         )
 
     if bname not in ("chrome", "edge"):
         return _err("setup_browser supports 'chrome' or 'edge' only.")
 
     if bname == "chrome":
-        binary = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        kill_name = "Google Chrome"
-        script_name = "chrome-agent"
-        alias_name = "chrome-agent"
+        binary          = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        kill_name       = "Google Chrome"
+        script_name     = "chrome-agent"
+        alias_name      = "chrome-agent"
+        real_udd        = Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
+        agent_udd       = Path.home() / ".webspeed" / "chrome-debug"
     else:
-        binary = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-        kill_name = "Microsoft Edge"
-        script_name = "edge-agent"
-        alias_name = "edge-agent"
+        binary          = "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+        kill_name       = "Microsoft Edge"
+        script_name     = "edge-agent"
+        alias_name      = "edge-agent"
+        real_udd        = Path.home() / "Library" / "Application Support" / "Microsoft Edge"
+        agent_udd       = Path.home() / ".webspeed" / "edge-debug"
 
     if not Path(binary).exists():
         return _err(
@@ -365,52 +370,80 @@ async def setup_browser(browser: str = "chrome") -> str:
             "Is it installed? Check /Applications/ for the correct path."
         )
 
-    # Create ~/bin/ if it doesn't exist
+    # ── Step 1: create the agent profile directory ────────────────────────────
+    agent_default = agent_udd / "Default"
+    agent_default.mkdir(parents=True, exist_ok=True)
+    agent_udd.chmod(0o700)
+
+    # ── Step 2: copy essential files from the real Chrome profile ─────────────
+    # Chrome only allows --remote-debugging-port on a non-default user data dir.
+    # We copy cookies + prefs so the agent profile starts already logged in.
+    # Local State lives at the user-data-dir level; everything else in Default/.
+    real_default = real_udd / "Default"
+    copy_results: list[str] = []
+
+    for fname, src, dst in [
+        ("Cookies",     real_default / "Cookies",     agent_default / "Cookies"),
+        ("Login Data",  real_default / "Login Data",  agent_default / "Login Data"),
+        ("Bookmarks",   real_default / "Bookmarks",   agent_default / "Bookmarks"),
+        ("Preferences", real_default / "Preferences", agent_default / "Preferences"),
+        ("Local State", real_udd / "Local State",     agent_udd / "Local State"),
+    ]:
+        if src.exists():
+            try:
+                shutil.copy2(str(src), str(dst))
+                copy_results.append(f"  copied {fname}")
+            except Exception as exc:
+                copy_results.append(f"  skipped {fname}: {exc}")
+        else:
+            copy_results.append(f"  not found: {fname}")
+
+    # ── Step 3: write the launch script ───────────────────────────────────────
     bin_dir = Path.home() / "bin"
     bin_dir.mkdir(exist_ok=True)
-
     script_path = bin_dir / script_name
+
     script_content = f"""#!/bin/bash
-# Auto-generated by web-speed-agent setup_browser
-# Kills any existing {browser} instance and relaunches with remote debugging.
+# Auto-generated by web-speed-agent — do not edit the --user-data-dir line.
+# Chrome requires a non-default user-data-dir to allow --remote-debugging-port.
 pkill -a -i "{kill_name}" 2>/dev/null
 sleep 1.5
-"{binary}" --remote-debugging-port=9222 "$@"
+"{binary}" \\
+  --user-data-dir="{agent_udd}" \\
+  --remote-debugging-port=9222 \\
+  --no-first-run \\
+  --disable-default-apps \\
+  "$@"
 """
     script_path.write_text(script_content)
     script_path.chmod(0o755)
 
-    # Add alias to ~/.zshrc if not already there
+    # ── Step 4: add shell alias ───────────────────────────────────────────────
     zshrc = Path.home() / ".zshrc"
     alias_line = f'alias {alias_name}="{script_path}"'
     zshrc_text = zshrc.read_text() if zshrc.exists() else ""
     if alias_name not in zshrc_text:
         with zshrc.open("a") as f:
-            f.write(f"\n# web-speed-agent: open {browser} with remote debugging\n{alias_line}\n")
-        alias_added = True
+            f.write(f"\n# web-speed-agent\n{alias_line}\n")
+        alias_note = f"Added alias to ~/.zshrc — run 'source ~/.zshrc' or open a new Terminal"
     else:
-        alias_added = False
-
-    steps_done = [f"Created script: {script_path}"]
-    if alias_added:
-        steps_done.append(f"Added alias '{alias_name}' to ~/.zshrc")
-    else:
-        steps_done.append(f"Alias '{alias_name}' already in ~/.zshrc")
+        alias_note = f"Alias '{alias_name}' already in ~/.zshrc"
 
     return _ok({
-        "message": f"{browser.capitalize()} debug wrapper installed.",
-        "steps_completed": steps_done,
+        "message": f"{browser.capitalize()} agent profile created at {agent_udd}",
+        "profile_files": copy_results,
+        "script": str(script_path),
+        "alias_status": alias_note,
         "next_steps": [
-            f"Run 'source ~/.zshrc' in Terminal (or open a new Terminal window)",
-            f"Type '{alias_name}' in Terminal to open {browser} with remote debugging",
-            f"Then tell the agent: open_browser(browser='{bname}', cdp_url='http://localhost:9222')",
-            f"The agent will open a new tab in your real {browser} window",
+            "1. Close Chrome completely (Cmd+Q) if it is open",
+            f"2. Run 'source ~/.zshrc' in Terminal to activate the alias",
+            f"3. Type '{alias_name}' in Terminal — Chrome opens with your logins ready",
+            f"4. Tell the agent: open_browser(browser='{bname}', cdp_url='http://localhost:9222')",
+            "   → The agent opens a new tab in your real Chrome window",
             "",
-            f"To replace the Dock icon: right-click Chrome in Dock → Options → Show in Finder,",
-            f"then replace it with an Automator app that runs: {script_path}",
+            "Re-run setup_browser() any time to sync fresh cookies from your main Chrome profile.",
+            "Keep Chrome open via 'chrome-agent' and the agent can always connect instantly.",
         ],
-        "script_path": str(script_path),
-        "alias": alias_name,
     })
 
 
