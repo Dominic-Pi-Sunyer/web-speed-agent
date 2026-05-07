@@ -265,6 +265,7 @@ Once connected, the AI can use these tools automatically — you don't need to c
 | Tool | What it does |
 |------|-------------|
 | `store_credential` | Save a site's login to your system keychain |
+| `setup_browser` | One-time setup: installs a wrapper so Chrome/Edge always starts with the debug port, enabling the agent to open tabs in your real browser |
 | `open_browser` | Open a browser — choose Chrome, Firefox, or Edge; or attach to one already running |
 | `navigate` | Go to a URL |
 | `login` | Fill and submit a login form |
@@ -287,7 +288,19 @@ Once connected, the AI can use these tools automatically — you don't need to c
 
 ## Using your existing browser (recommended for protected sites)
 
-By default the agent launches a fresh Playwright browser. For sites that detect automation — e-commerce checkouts, social networks, dashboards — you can instead **attach to your own running Chrome, Firefox, or Edge**. No new window opens, you stay logged in, and the site sees your real browser fingerprint.
+By default the agent launches a fresh Playwright browser. For sites that detect automation — e-commerce checkouts, social networks, dashboards — you can instead use your real browser session with all your existing logins.
+
+### Why can't the agent just open a tab in my running browser?
+
+Browsers don't expose any control interface by default — that would be a serious security hole. The only official way to control a running browser externally is the **Chrome DevTools Protocol (CDP)**, and that must be enabled when the browser starts with `--remote-debugging-port=9222`.
+
+The good news: once Chrome is set up to always start with the debug port, the agent *does* open a real new tab in your actual Chrome window, with all your existing sessions — exactly like a normal tab.
+
+**Quickest setup (ask the agent):**
+```
+setup_browser(browser="chrome")
+```
+This installs a shell script and alias that kills/relaunches Chrome with the debug port. Run it once, then always open Chrome using the new `chrome-agent` shortcut. The agent can then always connect to your real browser without any extra steps.
 
 ### Is the remote debugging port safe?
 
