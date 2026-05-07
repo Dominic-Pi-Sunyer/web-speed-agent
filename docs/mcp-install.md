@@ -369,18 +369,12 @@ macOS:
 pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
-Windows:
+Windows (Powershell & Cmd):
 ```batch
 taskkill /F /IM chrome.exe /T 2>nul
 timeout /t 2 /nobreak >nul
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222```
 
-**Verify it worked** — open `http://localhost:9222` in another browser. You should see a JSON list of tabs. If you see "Connection Refused", repeat the kill step.
-
-*macOS alias* — add to `~/.zshrc`:
-```bash
-alias chrome-agent='pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
 ```
 
 *Windows .bat file* — create `chrome-agent.bat` on your desktop:
@@ -388,10 +382,8 @@ alias chrome-agent='pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applica
 @echo off
 taskkill /F /IM chrome.exe /T 2>nul
 timeout /t 2 /nobreak >nul
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222```
 
-**Step 2 — Tell the agent to connect:**
 ```
 open_browser(browser="chrome", cdp_url="http://localhost:9222")
 ```
