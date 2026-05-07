@@ -13,6 +13,10 @@ pip install web-speed-agent
 playwright install chromium
 ```
 
+> **Want to use this with Claude, Gemini, or other AI clients?**
+> 
+> Check out the **[MCP Server Installation Guide](docs/mcp-install.md)** — it's the easiest way to let AI agents log in and extract data through natural language.
+
 ---
 
 ## How it works
