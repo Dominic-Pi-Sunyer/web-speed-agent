@@ -47,9 +47,13 @@ HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"
 
 # ── stealth browser config ────────────────────────────────────────────────────
 
-_USER_AGENT = (
+_UA_CHROME = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_UA_FIREFOX = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+    "Gecko/20100101 Firefox/133.0"
 )
 
 _CHROMIUM_ARGS = [
@@ -61,7 +65,8 @@ _CHROMIUM_ARGS = [
     "--disable-dev-shm-usage",
 ]
 
-# Masks headless browser signals before any page script runs
+# Masks headless browser signals before any page script runs.
+# Works on both Chromium and Firefox (pure JS, no browser-specific APIs).
 _STEALTH_INIT = """\
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
@@ -75,15 +80,30 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 
 # ── global browser state (persists across tool calls in this process) ─────────
 
-_pw       = None   # playwright instance
-_browser  = None   # Browser
-_context  = None   # BrowserContext
-_page     = None   # Page  (the active tab)
+_pw           = None   # playwright instance
+_browser      = None   # Browser
+_context      = None   # BrowserContext
+_page         = None   # Page  (the active tab)
 _session_name: str | None = None
+_cdp_mode:    bool = False   # True when connected to an existing browser via CDP
+_browser_name: str = "chrome"  # "chrome" | "firefox" | "edge"
 
 mcp = FastMCP("web-speed-agent")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _get_browser_type(browser: str, pw: Any):
+    """Return the Playwright browser-type object for the requested browser."""
+    b = browser.lower()
+    if b in ("chrome", "chromium", "edge"):
+        return pw.chromium
+    if b in ("firefox", "ff"):
+        return pw.firefox
+    raise ValueError(
+        f"Unknown browser '{browser}'. "
+        "Choose: chrome, firefox, or edge"
+    )
+
 
 def _ok(data: dict[str, Any]) -> str:
     return json.dumps({"ok": True, **data}, ensure_ascii=False, indent=2)
@@ -127,17 +147,51 @@ async def store_credential(site: str, username: str, password: str) -> str:
 
 @mcp.tool()
 async def open_browser(
+    browser: str = "chrome",
     session_name: str | None = None,
     headless: bool | None = None,
+    cdp_url: str | None = None,
 ) -> str:
-    """Open a local Playwright browser.
+    """Open a browser for automation.
+
+    **browser** — which browser to use: "chrome" (default), "firefox", or "edge".
+
+    ── Standard mode (default) ──────────────────────────────────────────────────
+    Launches a fresh Playwright-controlled browser. Use session_name to save
+    cookies and reuse them next time without logging in again.
+
+    ── CDP mode (attach to your existing browser) ───────────────────────────────
+    Connects to a browser you already have open and logged in. No new window,
+    no re-login, and the real browser fingerprint makes bot detection much harder.
+
+    First, relaunch your browser with the remote-debugging port enabled:
+
+      Chrome / Edge — macOS:
+        /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\
+            --remote-debugging-port=9222
+      Chrome / Edge — Windows:
+        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222
+
+      Firefox — macOS:
+        /Applications/Firefox.app/Contents/MacOS/firefox \\
+            --remote-debugging-port=9222 --no-remote
+      Firefox — Windows:
+        "C:\\Program Files\\Mozilla Firefox\\firefox.exe" --remote-debugging-port=9222 --no-remote
+
+    Then call: open_browser(browser="chrome", cdp_url="http://localhost:9222")
+               open_browser(browser="firefox", cdp_url="http://localhost:9222")
+
+    The agent opens a new tab. When close_browser() is called the tab is closed
+    but the browser stays running.
 
     Args:
-        session_name: Optional name to persist cookies between runs
-                      (e.g. "indiehackers"). Omit for a fresh session.
-        headless: Run browser without a visible window. Default: False (visible).
+        browser: "chrome" (default), "firefox", or "edge".
+        session_name: Cookie-persist name for standard mode (ignored in CDP mode).
+        headless: Hide the window in standard mode (default False, ignored in CDP mode).
+        cdp_url: Attach to an already-running browser instead of launching one.
+                 Typically "http://localhost:9222".
     """
-    global _pw, _browser, _context, _page, _session_name
+    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _browser_name
 
     # Close any existing browser cleanly
     if _page or _context or _browser:
@@ -149,47 +203,123 @@ async def open_browser(
         return _err("Playwright not installed. Run: pip install playwright && playwright install chromium")
 
     try:
+        bname = browser.lower()
+        _browser_name = bname
         _pw = await async_playwright().start()
-        run_headless = headless if headless is not None else HEADLESS
-        _browser = await _pw.chromium.launch(headless=run_headless, args=_CHROMIUM_ARGS)
+        engine = _get_browser_type(bname, _pw)
 
-        ctx_opts: dict[str, Any] = {
-            "user_agent": _USER_AGENT,
-            "viewport": {"width": 1920, "height": 1080},
-            "extra_http_headers": {
-                "Accept-Language": "en-US,en;q=0.9",
-                "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-            },
-        }
-        _session_name = session_name
+        if cdp_url:
+            # ── CDP mode: attach to a running browser ─────────────────────────
+            try:
+                _browser = await engine.connect_over_cdp(cdp_url)
+            except Exception as exc:
+                tips = {
+                    "chrome": (
+                        "macOS:   /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n"
+                        'Windows: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
+                    ),
+                    "edge": (
+                        'Windows: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222'
+                    ),
+                    "firefox": (
+                        "macOS:   /Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote\n"
+                        'Windows: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" --remote-debugging-port=9222 --no-remote'
+                    ),
+                }.get(bname, "")
+                return _err(
+                    f"Could not connect to {browser} at {cdp_url}: {exc}\n\n"
+                    f"Make sure {browser} is running with --remote-debugging-port=9222.\n"
+                    + tips
+                )
 
-        if session_name:
-            _validate_session_name(session_name)
-            session_dir = SESSIONS / session_name
-            _secure_mkdir(session_dir)
-            storage_file = session_dir / "storage.json"
-            if storage_file.exists():
-                mode = storage_file.stat().st_mode
-                if mode & (stat.S_IRGRP | stat.S_IROTH):
-                    import warnings
-                    warnings.warn(f"Session file {storage_file} is readable by others.")
-                ctx_opts["storage_state"] = str(storage_file)
+            # Grab the user's existing context (normal browsing session)
+            contexts = _browser.contexts
+            _context = contexts[0] if contexts else await _browser.new_context()
 
-        _context = await _browser.new_context(**ctx_opts)
-        await _context.add_init_script(_STEALTH_INIT)
-        _page = await _context.new_page()
+            # Open a fresh tab so we don't disturb the user's open pages
+            _page = await _context.new_page()
+            _session_name = None
+            _cdp_mode = True
 
-        msg = f"Browser opened"
-        if session_name:
-            loaded = "storage.json" in str(ctx_opts.get("storage_state", ""))
-            msg += f" with session '{session_name}'"
-            msg += " (existing cookies loaded)" if loaded else " (fresh session)"
-        return _ok({"message": msg, "headless": run_headless, "session": session_name})
+            return _ok({
+                "message": f"Connected to existing {browser} at {cdp_url}. New tab opened.",
+                "browser": browser,
+                "cdp": True,
+                "tabs_open": len(_context.pages),
+                "note": "Using your real browser — already logged in, real fingerprint.",
+            })
 
+        else:
+            # ── Standard mode: launch a fresh browser ─────────────────────────
+            _cdp_mode = False
+            run_headless = headless if headless is not None else HEADLESS
+
+            if bname in ("chrome", "chromium"):
+                _browser = await engine.launch(
+                    headless=run_headless, args=_CHROMIUM_ARGS
+                )
+                user_agent = _UA_CHROME
+                extra_headers: dict[str, str] = {
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            elif bname == "edge":
+                _browser = await engine.launch(
+                    headless=run_headless, channel="msedge", args=_CHROMIUM_ARGS
+                )
+                user_agent = _UA_CHROME.replace("Chrome/131", "Edg/131")
+                extra_headers = {
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-ch-ua": '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            else:  # firefox
+                _browser = await engine.launch(headless=run_headless)
+                user_agent = _UA_FIREFOX
+                extra_headers = {"Accept-Language": "en-US,en;q=0.9"}
+
+            ctx_opts: dict[str, Any] = {
+                "user_agent": user_agent,
+                "viewport": {"width": 1920, "height": 1080},
+                "extra_http_headers": extra_headers,
+            }
+            _session_name = session_name
+
+            if session_name:
+                _validate_session_name(session_name)
+                session_dir = SESSIONS / session_name
+                _secure_mkdir(session_dir)
+                storage_file = session_dir / "storage.json"
+                if storage_file.exists():
+                    mode = storage_file.stat().st_mode
+                    if mode & (stat.S_IRGRP | stat.S_IROTH):
+                        import warnings
+                        warnings.warn(f"Session file {storage_file} is readable by others.")
+                    ctx_opts["storage_state"] = str(storage_file)
+
+            _context = await _browser.new_context(**ctx_opts)
+            await _context.add_init_script(_STEALTH_INIT)
+            _page = await _context.new_page()
+
+            msg = f"{browser.capitalize()} opened"
+            if session_name:
+                loaded = "storage.json" in str(ctx_opts.get("storage_state", ""))
+                msg += f" with session '{session_name}'"
+                msg += " (existing cookies loaded)" if loaded else " (fresh session)"
+            return _ok({
+                "message": msg,
+                "browser": browser,
+                "headless": run_headless,
+                "session": session_name,
+            })
+
+    except ValueError as exc:
+        return _err(str(exc))
     except Exception as exc:
-        return _err(f"Could not launch browser: {exc}. Try: playwright install chromium")
+        return _err(f"Could not open {browser}: {exc}. Try: playwright install chromium firefox")
 
 
 @mcp.tool()
@@ -500,38 +630,68 @@ async def evaluate(js: str) -> str:
 
 @mcp.tool()
 async def close_browser() -> str:
-    """Save the browser session (cookies) and close the browser.
+    """Close the tab and disconnect from the browser.
 
-    Always call this when you are done to persist the session for next time.
+    In CDP mode (connected to your existing Chrome): closes the tab the agent
+    opened and disconnects. Chrome itself stays running with all your other tabs.
+
+    In standard mode: saves the session (if named) and closes the browser.
     """
-    global _pw, _browser, _context, _page, _session_name
+    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _browser_name
 
+    was_cdp = _cdp_mode
     saved = False
-    if _context and _session_name:
+
+    if was_cdp:
+        # CDP mode — close only the tab we opened; leave Chrome running
         try:
-            session_dir = SESSIONS / _session_name
-            _secure_mkdir(session_dir)
-            storage_file = session_dir / "storage.json"
-            await _context.storage_state(path=str(storage_file))
-            storage_file.chmod(0o600)
-            saved = True
+            if _page:
+                await _page.close()
+        except Exception:
+            pass
+        try:
+            if _browser:
+                await _browser.close()  # disconnects from CDP, does NOT kill Chrome
+        except Exception:
+            pass
+        try:
+            if _pw:
+                await _pw.stop()
+        except Exception:
+            pass
+    else:
+        # Standard mode — optionally save session, then shut down the browser
+        if _context and _session_name:
+            try:
+                session_dir = SESSIONS / _session_name
+                _secure_mkdir(session_dir)
+                storage_file = session_dir / "storage.json"
+                await _context.storage_state(path=str(storage_file))
+                storage_file.chmod(0o600)
+                saved = True
+            except Exception:
+                pass
+
+        try:
+            if _context:
+                await _context.close()
+            if _browser:
+                await _browser.close()
+            if _pw:
+                await _pw.stop()
         except Exception:
             pass
 
-    try:
-        if _context:
-            await _context.close()
-        if _browser:
-            await _browser.close()
-        if _pw:
-            await _pw.stop()
-    except Exception:
-        pass
-
     _page = _context = _browser = _pw = None
-    msg = "Browser closed"
-    if saved:
-        msg += f" and session '{_session_name}' saved"
+    _cdp_mode = False
+    _browser_name = "chrome"
+
+    if was_cdp:
+        msg = "Tab closed and disconnected from Chrome (Chrome is still running)"
+    else:
+        msg = "Browser closed"
+        if saved:
+            msg += f" and session '{_session_name}' saved"
     _session_name = None
     return _ok({"message": msg, "session_saved": saved})
 
