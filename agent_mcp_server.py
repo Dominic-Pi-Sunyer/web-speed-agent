@@ -95,15 +95,18 @@ mcp = FastMCP("web-speed-agent")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _resolve_firefox_profile(path: str) -> Path | None:
-    """Return a Firefox profile directory path.
+def _resolve_firefox_profile(path: str) -> tuple[Path | None, str]:
+    """Return (profile_dir, description) for a Firefox profile.
 
-    Pass "auto" to find the default profile from profiles.ini,
-    or pass an explicit path string.
+    Pass "auto" to find the standard (non-Nightly) default profile from
+    profiles.ini, or pass an explicit path string.
+    Returns (None, error_message) if not found.
     """
     if path != "auto":
         p = Path(path).expanduser()
-        return p if p.exists() else None
+        if p.exists():
+            return p, str(p)
+        return None, f"path does not exist: {path}"
 
     system = platform.system()
     if system == "Darwin":
@@ -115,31 +118,54 @@ def _resolve_firefox_profile(path: str) -> Path | None:
 
     ini = base / "profiles.ini"
     if not ini.exists():
-        return None
+        return None, f"profiles.ini not found at {ini}"
 
     cfg = configparser.ConfigParser()
     cfg.read(ini)
 
-    # Prefer the section explicitly marked Default=1
+    def _is_special(raw: str) -> bool:
+        low = raw.lower()
+        return any(k in low for k in ("nightly", "dev-edition", "developer"))
+
+    def _try(section: str) -> Path | None:
+        raw = cfg.get(section, "Path", fallback="")
+        if not raw:
+            return None
+        relative = cfg.get(section, "IsRelative", fallback="1") == "1"
+        p = (base / raw) if relative else Path(raw)
+        return p if p.exists() else None
+
+    # Pass 1: Default=1 sections that are NOT Nightly / Dev Edition
     for section in cfg.sections():
         if cfg.get(section, "Default", fallback="") == "1":
             raw = cfg.get(section, "Path", fallback="")
-            relative = cfg.get(section, "IsRelative", fallback="1") == "1"
-            if raw:
-                p = (base / raw) if relative else Path(raw)
-                if p.exists():
-                    return p
+            if raw and not _is_special(raw):
+                p = _try(section)
+                if p:
+                    return p, str(p)
 
-    # Fallback: first profile directory that exists on disk
+    # Pass 2: any Default=1 section (user may only have Nightly)
+    for section in cfg.sections():
+        if cfg.get(section, "Default", fallback="") == "1":
+            p = _try(section)
+            if p:
+                return p, str(p)
+
+    # Pass 3: first non-Nightly profile on disk
     for section in cfg.sections():
         raw = cfg.get(section, "Path", fallback="")
-        relative = cfg.get(section, "IsRelative", fallback="1") == "1"
-        if raw:
-            p = (base / raw) if relative else Path(raw)
-            if p.exists():
-                return p
+        if raw and not _is_special(raw):
+            p = _try(section)
+            if p:
+                return p, str(p)
 
-    return None
+    # Pass 4: any profile
+    for section in cfg.sections():
+        p = _try(section)
+        if p:
+            return p, str(p)
+
+    return None, f"no valid profile found in {ini}"
 
 
 def _get_browser_type(browser: str, pw: Any):
@@ -323,14 +349,14 @@ async def open_browser(
                     f"For {browser}, use cdp_url to attach to a running instance."
                 )
 
-            resolved = _resolve_firefox_profile(profile_path)
+            resolved, resolve_desc = _resolve_firefox_profile(profile_path)
             if resolved is None:
                 hint = (
                     "macOS:   ~/Library/Application Support/Firefox/Profiles/<name>\n"
                     "Windows: %APPDATA%\\Mozilla\\Firefox\\Profiles\\<name>"
                 )
                 return _err(
-                    f"Could not find Firefox profile at '{profile_path}'.\n\n"
+                    f"Could not find Firefox profile at '{profile_path}' ({resolve_desc}).\n\n"
                     "Pass profile_path='auto' to detect it automatically, or find "
                     "the full path to your profile folder:\n" + hint
                 )
@@ -357,10 +383,10 @@ async def open_browser(
             _persistent_ctx = True
 
             return _ok({
-                "message": f"Firefox launched with existing profile from {resolved}.",
+                "message": f"Firefox launched with profile: {resolved.name}",
                 "browser": "firefox",
                 "profile": str(resolved),
-                "note": "Your existing logins and cookies are loaded.",
+                "note": "Your existing logins and cookies are loaded. If the wrong profile loaded, pass the full path to your profile folder explicitly.",
             })
 
         else:

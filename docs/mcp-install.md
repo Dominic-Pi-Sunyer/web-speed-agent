@@ -377,17 +377,17 @@ Your logins are not lost — they are stored in your Firefox profile folder on d
 open_browser(browser="firefox", profile_path="auto")
 ```
 
-`profile_path="auto"` automatically finds and uses your default Firefox profile. If it picks the wrong profile, find your profile folders here:
+`profile_path="auto"` reads your Firefox `profiles.ini` and picks the standard Firefox profile, deliberately skipping any profiles with "nightly" or "dev-edition" in their path. It returns the profile name in the response so you can verify it found the right one.
+
+If it still picks the wrong profile, find your profile folders here:
 
 - **macOS:** `~/Library/Application Support/Firefox/Profiles/`
 - **Windows:** `%APPDATA%\Mozilla\Firefox\Profiles\`
 
-Each subfolder is a separate profile (e.g. `abc123.default-release`). Pass the full path to use a specific one:
+Each subfolder is a separate profile. Standard Firefox profiles typically end in `.default-release`; Nightly profiles end in `.default-nightly`. Pass the full path to a specific one:
 ```
 open_browser(browser="firefox", profile_path="~/Library/Application Support/Firefox/Profiles/abc123.default-release")
 ```
-
-> **Firefox Nightly / Developer Edition** each have their own separate profile directory. If you regularly use Nightly, pass its profile path explicitly rather than using `"auto"`.
 
 ---
 
@@ -607,11 +607,22 @@ open_browser(browser="firefox", profile_path="auto")
 
 This launches Firefox with your existing profile (all logins and cookies intact). Firefox must be fully closed first (Cmd+Q on Mac).
 
+**Firefox opens with the wrong profile (e.g. Nightly instead of standard Firefox)**
+
+`profile_path="auto"` skips profiles with "nightly" or "dev-edition" in the path. If it still picks the wrong one, the response shows which profile name was selected — use that to diagnose. Then pass the profile path explicitly:
+
+- macOS: `~/Library/Application Support/Firefox/Profiles/` — find the subfolder ending in `.default-release`
+- Windows: `%APPDATA%\Mozilla\Firefox\Profiles\` — find the subfolder ending in `.default-release`
+
+```
+open_browser(browser="firefox", profile_path="~/Library/Application Support/Firefox/Profiles/abc123.default-release")
+```
+
 **"Could not launch Firefox with profile" error**
 
 - Firefox must be **fully quit** before calling `open_browser` with a profile — the profile is file-locked while Firefox is running.
 - Make sure `playwright install firefox` has been run once.
-- If `profile_path="auto"` picks the wrong profile, find your profiles at `~/Library/Application Support/Firefox/Profiles/` (Mac) or `%APPDATA%\Mozilla\Firefox\Profiles\` (Windows) and pass the full path explicitly.
+- If the error persists, try passing the profile path explicitly (see above) instead of `"auto"`.
 
 ---
 
