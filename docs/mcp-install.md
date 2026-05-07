@@ -34,15 +34,17 @@ The AI handles the login, navigation, and data extraction. You get clean structu
 
 **macOS / Linux:**
 ```bash
-pip3 install web-speed-agent
+pip3 install "web-speed-agent[mcp]"
 playwright install chromium
 ```
 
 **Windows:**
 ```
-pip install web-speed-agent
+pip install "web-speed-agent[mcp]"
 python -m playwright install chromium
 ```
+
+The `[mcp]` extra installs the MCP SDK that the server needs to talk to Claude Desktop and other AI clients.
 
 > **Windows tip:** Always use `python -m playwright` on Windows — the plain `playwright` command is often not found even after install.
 
@@ -213,6 +215,20 @@ View your balance and top up at **[getwebspeed.io/account](https://getwebspeed.i
 ---
 
 ## Troubleshooting
+
+**"No module named 'mcp'"**
+The MCP SDK wasn't installed. Re-run the install with the `[mcp]` extra using the same Python that runs your MCP server:
+```
+python -m pip install "web-speed-agent[mcp]"
+```
+On Mac/Linux: `pip3 install "web-speed-agent[mcp]"`
+
+**Wrong Python version — "No module named ..." after install**
+Windows often has multiple Python versions installed. If you installed the package using Python 3.13 but your config points at Python 3.9, the packages won't be found. Always use the same Python executable in your config that you used to run `pip install`. Find the right path:
+```
+where python
+```
+Then use the Python 3.13 entry (e.g. `C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe`) as the `command` in your config. Python 3.9 is also below the minimum version (3.10) and won't work regardless.
 
 **"Python was not found" or Windows opens the Microsoft Store**
 Windows has an App Execution Alias that intercepts the `python3` command and redirects to the Store. The fix: use `python` (not `python3`) as the command in your config. If it still fails, use the full path to your Python executable:
