@@ -3,7 +3,7 @@
 The Web Speed Agent MCP server lets Claude, Gemini, and any MCP-compatible AI client log into websites, navigate pages, and extract structured data — all through natural language. The browser runs on your machine, so your passwords never leave.
 
 > **You'll need a Web Speed API key.** The MCP server is the local bridge; the extraction engine runs in the cloud on your key.
-> Get one at **[getwebspeed.io](https://getwebspeed.io)** 
+> Get one at **[getwebspeed.io](https://getwebspeed.io)**
 
 ---
 
@@ -24,7 +24,7 @@ The AI handles the login, navigation, and data extraction. You get clean structu
 
 | Requirement | Notes |
 |-------------|-------|
-| Python 3.10 or later | `python3 --version` to check |
+| Python 3.10 or later | Check: `python --version` (Windows) or `python3 --version` (Mac/Linux) |
 | pip | Comes with Python |
 | Web Speed API key | [getwebspeed.io](https://getwebspeed.io) |
 
@@ -32,17 +32,19 @@ The AI handles the login, navigation, and data extraction. You get clean structu
 
 ## Step 1 — Install the package
 
+**macOS / Linux:**
 ```bash
-pip install web-speed-agent
-```
-
-Then install the Chromium browser that Playwright will control:
-
-```bash
+pip3 install web-speed-agent
 playwright install chromium
 ```
 
-> **Windows note:** If `playwright` isn't found after install, use `python -m playwright install chromium`.
+**Windows:**
+```
+pip install web-speed-agent
+python -m playwright install chromium
+```
+
+> **Windows tip:** Always use `python -m playwright` on Windows — the plain `playwright` command is often not found even after install.
 
 ---
 
@@ -67,12 +69,11 @@ Pick the client you use. You only need to do one.
 
 ### Claude Desktop
 
-**macOS** — open `~/Library/Application Support/Claude/claude_desktop_config.json`
+Open Claude Desktop, then go to **Settings → Developer → Edit Config**.
 
-**Windows** — open `%APPDATA%\Claude\claude_desktop_config.json`
+This opens the config file in your default text editor. Add the `web-speed-agent` block shown below. If you already have other MCP servers, add it inside the existing `mcpServers` block — don't replace what's already there.
 
-Add the `web-speed-agent` entry. If you already have other MCP servers, add it inside the existing `mcpServers` block.
-
+**macOS / Linux:**
 ```json
 {
   "mcpServers": {
@@ -87,32 +88,44 @@ Add the `web-speed-agent` entry. If you already have other MCP servers, add it i
 }
 ```
 
-> **Windows:** Use `python` instead of `python3`, and use forward slashes or escaped backslashes in the path:
-> ```json
-> "command": "python",
-> "args": ["C:/Users/YourName/tools/agent_mcp_server.py"]
-> ```
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "web-speed-agent": {
+      "command": "python",
+      "args": ["C:/Users/YourName/tools/agent_mcp_server.py"],
+      "env": {
+        "WEBSPEED_API_KEY": "wsp_your_key_here"
+      }
+    }
+  }
+}
+```
 
-Save the file and **restart Claude Desktop**. You should see "web-speed-agent" listed under connected tools.
+> **Windows path format:** Use forward slashes (`C:/Users/...`) or escaped backslashes (`C:\\Users\\...`) in JSON. Regular backslashes will cause an error.
+
+Save the file and **restart Claude Desktop** (quit fully from the system tray, then reopen). You should see "web-speed-agent" listed under connected tools in Settings → Developer.
 
 ---
 
 ### Claude Code (CLI)
 
-Run this once from any terminal:
-
+**macOS / Linux** — run this once:
 ```bash
 claude mcp add web-speed-agent python3 /Users/yourname/tools/agent_mcp_server.py
 ```
 
-Then set your API key in the environment before starting Claude Code:
+**Windows** — run this once:
+```
+claude mcp add web-speed-agent python C:/Users/YourName/tools/agent_mcp_server.py
+```
+
+Then set your API key. Add this to your shell profile (`~/.zshrc`, `~/.bashrc`) on Mac/Linux, or set it as a Windows environment variable in System Properties:
 
 ```bash
 export WEBSPEED_API_KEY="wsp_your_key_here"
-claude
 ```
-
-To make the key permanent, add the export line to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.).
 
 ---
 
@@ -120,12 +133,28 @@ To make the key permanent, add the export line to your shell profile (`~/.zshrc`
 
 Open `~/.gemini/settings.json` and add:
 
+**macOS / Linux:**
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
       "command": "python3",
       "args": ["/Users/yourname/tools/agent_mcp_server.py"],
+      "env": {
+        "WEBSPEED_API_KEY": "wsp_your_key_here"
+      }
+    }
+  }
+}
+```
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "web-speed-agent": {
+      "command": "python",
+      "args": ["C:/Users/YourName/tools/agent_mcp_server.py"],
       "env": {
         "WEBSPEED_API_KEY": "wsp_your_key_here"
       }
@@ -185,34 +214,38 @@ View your balance and top up at **[getwebspeed.io/account](https://getwebspeed.i
 
 ## Troubleshooting
 
-**"No module named 'web_speed_agent'"**
-The package isn't installed in the Python that the MCP server is running under. Find your Python path with `which python3` and use the full path in your config:
+**"Python was not found" or Windows opens the Microsoft Store**
+Windows has an App Execution Alias that intercepts the `python3` command and redirects to the Store. The fix: use `python` (not `python3`) as the command in your config. If it still fails, use the full path to your Python executable:
 ```json
-"command": "/usr/local/bin/python3"
+"command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe"
+```
+You can find the exact path by running `where python` in a Command Prompt.
+
+**"No module named 'web_speed_agent'"**
+The package isn't installed in the Python that the MCP server is running under. Confirm which Python you're using with `where python` (Windows) or `which python3` (Mac/Linux), then use that full path as the `command` in your config:
+```json
+"command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe"
 ```
 
-**"playwright: command not found" or browser won't launch**
-Run `playwright install chromium` again using the same Python that runs the server:
-```bash
-python3 -m playwright install chromium
+**Playwright browser won't launch**
+Run the install using the same Python that runs the MCP server:
+```
+python -m playwright install chromium
 ```
 
 **Claude Desktop shows the server as disconnected**
-- Check the JSON config is valid (no trailing commas, matching brackets)
+- Open Settings → Developer → Edit Config and check the JSON is valid (no trailing commas, all brackets matched)
 - Make sure the path to `agent_mcp_server.py` is absolute, not relative
-- Restart Claude Desktop fully (quit from the menu bar, not just close the window)
+- Quit Claude Desktop fully from the system tray icon, then reopen it
 
 **"WEBSPEED_API_KEY not set"**
-The key must be in the `env` block of your config, not just exported in your terminal — Claude Desktop and Gemini CLI don't inherit shell environment variables.
-
-**Windows: path errors on startup**
-Use forward slashes in JSON paths (`C:/Users/...`) or escape backslashes (`C:\\Users\\...`). Both work.
+The key must be in the `env` block of your config file — Claude Desktop and Gemini CLI don't inherit variables from your terminal session.
 
 ---
 
 ## Keeping credentials safe
 
-- Your login passwords live in the system keychain only — they are never written to files or sent anywhere
-- Your API key is the only thing that leaves your machine (it goes to `api.getwebspeed.io` to authenticate extraction requests)
-- Browser session cookies are stored in `~/.webspeed/sessions/` with owner-only permissions (`600`)
+- Login passwords live in the system keychain only — never written to files, never sent to any server
+- Your API key is the only credential that leaves your machine (sent over HTTPS to `api.getwebspeed.io`)
+- Browser session cookies are stored in `~/.webspeed/sessions/` with owner-only permissions
 - Revoke your API key at any time from [getwebspeed.io/account](https://getwebspeed.io/account)
