@@ -168,6 +168,28 @@ def _resolve_firefox_profile(path: str) -> tuple[Path | None, str]:
     return None, f"no valid profile found in {ini}"
 
 
+def _find_chrome_profile(browser: str) -> Path | None:
+    """Find the Chrome or Edge user-data directory on this machine."""
+    system = platform.system()
+    b = browser.lower()
+    if b in ("chrome", "chromium"):
+        paths = {
+            "Darwin":  Path.home() / "Library" / "Application Support" / "Google" / "Chrome",
+            "Windows": Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data",
+            "Linux":   Path.home() / ".config" / "google-chrome",
+        }
+    elif b == "edge":
+        paths = {
+            "Darwin":  Path.home() / "Library" / "Application Support" / "Microsoft Edge",
+            "Windows": Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "User Data",
+            "Linux":   Path.home() / ".config" / "microsoft-edge",
+        }
+    else:
+        return None
+    p = paths.get(system)
+    return p if p and p.exists() else None
+
+
 def _get_browser_type(browser: str, pw: Any):
     """Return the Playwright browser-type object for the requested browser."""
     b = browser.lower()
@@ -237,20 +259,23 @@ async def open_browser(
     Launches a fresh Playwright browser. Use session_name to save cookies and
     reuse them on the next run.
 
+    ── Profile mode (recommended) ───────────────────────────────────────────────
+    Opens the browser using your real installed browser binary and existing
+    profile — all your logins and cookies are already there. The browser must
+    be fully closed first (profile directory is locked while it's running).
+
+      open_browser(browser="chrome",   profile_path="auto")
+      open_browser(browser="firefox",  profile_path="auto")
+      open_browser(browser="edge",     profile_path="auto")
+
+    "auto" finds the profile directory automatically. Pass an explicit path to
+    override. Note: Playwright ships a Firefox Nightly build, so Firefox will
+    always show "Firefox Nightly" in the title bar — this is expected.
+
     ── CDP mode — Chrome / Edge only ────────────────────────────────────────────
-    Attaches to a Chrome or Edge window you already have open. No re-login
-    needed; the site sees your real browser fingerprint.
-    Relaunch the browser with --remote-debugging-port=9222 first, then pass
-    cdp_url="http://localhost:9222".
-
-    ── Profile mode — Firefox ───────────────────────────────────────────────────
-    Firefox does not support CDP. Instead, pass profile_path="auto" to launch
-    Firefox using your existing profile (all logins and cookies are preserved).
-    Firefox must be fully closed before calling this.
-
-      open_browser(browser="firefox", profile_path="auto")
-
-    Or pass an explicit profile directory path if "auto" doesn't find the right one.
+    Alternative for Chrome/Edge: attach to a browser you launched manually with
+    --remote-debugging-port=9222. More fragile than profile mode (ghost processes
+    can prevent the port from opening). Use profile mode when possible.
 
     Args:
         browser: "chrome" (default), "firefox", or "edge".
@@ -258,9 +283,9 @@ async def open_browser(
         headless: Hide the window in standard/profile mode (default False).
         cdp_url: Chrome/Edge only — attach to an already-running browser.
                  Typically "http://localhost:9222".
-        profile_path: Firefox only — launch with an existing Firefox profile.
-                      Pass "auto" to detect the default profile automatically,
-                      or a full path to a specific profile directory.
+        profile_path: Launch with an existing browser profile. Pass "auto" to
+                      detect the profile automatically, or a full directory path.
+                      Supported for chrome, firefox, and edge.
     """
     global _pw, _browser, _context, _page, _session_name, _cdp_mode, _persistent_ctx, _browser_name
 
@@ -342,52 +367,130 @@ async def open_browser(
             })
 
         elif profile_path:
-            # ── Profile mode: Firefox with existing user profile ──────────────
-            if bname != "firefox":
-                return _err(
-                    f"profile_path is only supported for Firefox. "
-                    f"For {browser}, use cdp_url to attach to a running instance."
-                )
-
-            resolved, resolve_desc = _resolve_firefox_profile(profile_path)
-            if resolved is None:
-                hint = (
-                    "macOS:   ~/Library/Application Support/Firefox/Profiles/<name>\n"
-                    "Windows: %APPDATA%\\Mozilla\\Firefox\\Profiles\\<name>"
-                )
-                return _err(
-                    f"Could not find Firefox profile at '{profile_path}' ({resolve_desc}).\n\n"
-                    "Pass profile_path='auto' to detect it automatically, or find "
-                    "the full path to your profile folder:\n" + hint
-                )
-
             run_headless = headless if headless is not None else HEADLESS
-            try:
-                _context = await engine.launch_persistent_context(
-                    str(resolved),
-                    headless=run_headless,
-                    viewport={"width": 1920, "height": 1080},
-                    args=["--remote-debugging-port=0"],  # ephemeral port, not exposed
-                )
-            except Exception as exc:
+
+            if bname == "firefox":
+                # ── Profile mode: Firefox ─────────────────────────────────────
+                resolved, resolve_desc = _resolve_firefox_profile(profile_path)
+                if resolved is None:
+                    hint = (
+                        "macOS:   ~/Library/Application Support/Firefox/Profiles/<name>\n"
+                        "Windows: %APPDATA%\\Mozilla\\Firefox\\Profiles\\<name>"
+                    )
+                    return _err(
+                        f"Could not find Firefox profile at '{profile_path}' ({resolve_desc}).\n\n"
+                        "Pass profile_path='auto' to detect it automatically, or find "
+                        "the full path to your profile folder:\n" + hint
+                    )
+
+                try:
+                    _context = await engine.launch_persistent_context(
+                        str(resolved),
+                        headless=run_headless,
+                        viewport={"width": 1920, "height": 1080},
+                        args=["--remote-debugging-port=0"],
+                    )
+                except Exception as exc:
+                    return _err(
+                        f"Could not launch Firefox with profile '{resolved}': {exc}\n\n"
+                        "Make sure Firefox is fully closed (Cmd+Q on Mac) before calling this."
+                    )
+
+                await _context.add_init_script(_STEALTH_INIT)
+                _page = await _context.new_page()
+                _browser = None
+                _session_name = None
+                _cdp_mode = False
+                _persistent_ctx = True
+
+                return _ok({
+                    "message": f"Firefox launched with profile: {resolved.name}",
+                    "browser": "firefox",
+                    "profile": str(resolved),
+                    "note": (
+                        "Your Firefox profile data (logins, cookies) is loaded. "
+                        "Playwright ships a Firefox Nightly build, so the browser window "
+                        "will show 'Firefox Nightly' — this is normal and expected. "
+                        "If the wrong profile loaded, pass the full profile path explicitly."
+                    ),
+                })
+
+            elif bname in ("chrome", "chromium", "edge"):
+                # ── Profile mode: Chrome / Edge with real user profile ────────
+                # We intentionally do NOT pass channel="chrome"/"msedge" here.
+                # System Chrome refuses remote debugging on its default user data
+                # directory ("DevTools remote debugging requires a non-default data
+                # directory"). Playwright's bundled Chromium has no such restriction
+                # and reads the same profile format. On macOS it uses the system
+                # Keychain, so encrypted cookies are decrypted the same way Chrome
+                # would — you stay logged in to your existing sessions.
+                if profile_path == "auto":
+                    resolved = _find_chrome_profile(bname)
+                    if resolved is None:
+                        hint = {
+                            "chrome": (
+                                "macOS:   ~/Library/Application Support/Google/Chrome\n"
+                                "Windows: %LOCALAPPDATA%\\Google\\Chrome\\User Data"
+                            ),
+                            "edge": (
+                                "Windows: %LOCALAPPDATA%\\Microsoft\\Edge\\User Data\n"
+                                "macOS:   ~/Library/Application Support/Microsoft Edge"
+                            ),
+                        }.get(bname, "")
+                        return _err(
+                            f"Could not find {browser} profile directory automatically.\n\n"
+                            "Pass the path explicitly:\n" + hint
+                        )
+                else:
+                    resolved = Path(profile_path).expanduser()
+                    if not resolved.exists():
+                        return _err(f"Profile path not found: {resolved}")
+
+                # Remove Chrome's singleton lock files so we can open the profile
+                # even if Chrome crashed or didn't exit cleanly.
+                for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                    try:
+                        (resolved / lock).unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+                try:
+                    _context = await engine.launch_persistent_context(
+                        str(resolved),
+                        headless=run_headless,
+                        viewport={"width": 1920, "height": 1080},
+                        args=_CHROMIUM_ARGS,
+                    )
+                except Exception as exc:
+                    return _err(
+                        f"Could not open {browser} with profile '{resolved}': {exc}\n\n"
+                        f"Make sure {browser} is fully closed before calling this — "
+                        "the profile directory is locked while the browser is running."
+                    )
+
+                await _context.add_init_script(_STEALTH_INIT)
+                _page = await _context.new_page()
+                _browser = None
+                _session_name = None
+                _cdp_mode = False
+                _persistent_ctx = True
+
+                return _ok({
+                    "message": f"Launched with your {browser.capitalize()} profile.",
+                    "browser": browser,
+                    "profile": str(resolved),
+                    "note": (
+                        "Your existing logins and cookies are loaded. "
+                        "The window uses Playwright's Chromium binary (not your system Chrome) "
+                        "to avoid Chrome's remote-debugging restriction on the default profile."
+                    ),
+                })
+
+            else:
                 return _err(
-                    f"Could not launch Firefox with profile '{resolved}': {exc}\n\n"
-                    "Make sure Firefox is fully closed (Cmd+Q on Mac) before calling this."
+                    f"profile_path is not supported for browser '{browser}'. "
+                    "Choose: chrome, firefox, or edge."
                 )
-
-            await _context.add_init_script(_STEALTH_INIT)
-            _page = await _context.new_page()
-            _browser = None  # owned by the persistent context, not a separate object
-            _session_name = None
-            _cdp_mode = False
-            _persistent_ctx = True
-
-            return _ok({
-                "message": f"Firefox launched with profile: {resolved.name}",
-                "browser": "firefox",
-                "profile": str(resolved),
-                "note": "Your existing logins and cookies are loaded. If the wrong profile loaded, pass the full path to your profile folder explicitly.",
-            })
 
         else:
             # ── Standard mode: launch a fresh browser ─────────────────────────

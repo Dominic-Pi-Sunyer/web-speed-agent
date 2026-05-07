@@ -302,55 +302,79 @@ By default the agent launches a fresh Playwright browser. For sites that detect 
 
 ---
 
-### How it works
+### How it works — profile mode vs CDP
 
-The debug port has to be enabled when the browser **starts** — you cannot attach it to an already-running browser. The workflow is always:
+There are two ways to attach the agent to your existing browser:
 
-1. **Kill all browser processes** — simply quitting isn't always enough. Chrome and Edge enforce single-instance rules, and background helper processes can stay alive and silently block the debug port. Use the kill commands in the browser-specific sections below.
-2. Relaunch with the debug flag using the command for your browser below
-3. Your logins and cookies are still there — they are stored in your browser profile on disk, not in the running process. The browser loads the same profile on restart.
-4. Tell the agent to connect
+**Profile mode (recommended for all browsers):** the agent opens your browser directly using its real installed binary and your existing profile folder. All your logins and cookies are there because they live on disk in the profile. The browser must be **fully quit first** — the profile directory is locked while the browser is open.
 
-The agent opens a **new tab** in your relaunched browser. When it calls `close_browser()`, only that tab is closed.
+```
+open_browser(browser="chrome",  profile_path="auto")
+open_browser(browser="firefox", profile_path="auto")
+open_browser(browser="edge",    profile_path="auto")
+```
+
+**CDP mode (Chrome/Edge fallback):** the agent attaches to a Chrome or Edge window you already have open via a remote debugging port. More setup required and fragile — ghost background processes can prevent the debug port from opening. Only use this if profile mode doesn't work for your setup.
+
+> **Firefox note:** Playwright ships its own Firefox Nightly build as the automation engine. The browser window will always show "Firefox Nightly" — this is expected and not a misconfiguration. Your real Firefox profile data (logins, bookmarks, cookies) is loaded from your standard Firefox profile. The Nightly label is cosmetic.
 
 ---
 
 ### Chrome
 
-**Step 1 — Kill Chrome and relaunch with the debug flag**
+#### Profile mode (recommended)
 
-Chrome only opens the debug port if it is the *first* Chrome process to start. Any existing Chrome window, background helper, or ghost process will silently prevent the port from opening. Kill first, then relaunch:
+No debug port needed. The agent loads your Chrome profile (cookies, logins, sessions) and opens it in Playwright's Chromium — no Chrome window appears, but all your logged-in sessions are there and ready.
 
-**macOS — run in Terminal:**
+> **Why Playwright's Chromium instead of system Chrome?** Chrome refuses remote debugging on its default profile directory ("DevTools remote debugging requires a non-default data directory"). Playwright's Chromium reads the same profile format without this restriction, and on macOS it uses the same system Keychain to decrypt cookies — so you stay logged in.
+
+**Step 1 — Quit Chrome completely** (Cmd+Q on Mac, not just the window).
+
+**Step 2 — Tell the agent to open Chrome:**
+```
+open_browser(browser="chrome", profile_path="auto")
+```
+
+`profile_path="auto"` finds your Chrome user data directory automatically:
+- macOS: `~/Library/Application Support/Google/Chrome`
+- Windows: `%LOCALAPPDATA%\Google\Chrome\User Data`
+
+If Chrome isn't fully closed, you'll get a clear error saying the profile is locked.
+
+---
+
+#### CDP mode (fallback)
+
+If profile mode doesn't work, you can attach to a Chrome window you launch manually with a debug port. This is more fragile — Chrome's single-instance enforcement means any existing Chrome process (including background helpers) will silently prevent the debug port from opening.
+
+**Step 1 — Kill Chrome completely, then relaunch:**
+
+macOS:
 ```bash
 pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
-**Windows — run in Command Prompt:**
+Windows:
 ```batch
 taskkill /F /IM chrome.exe /T 2>nul
 timeout /t 2 /nobreak >nul
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
 
-**Verify it worked** — open `http://localhost:9222` in another browser. You should see a JSON list of open tabs. If you see "Connection Refused", a Chrome process is still running — repeat the kill step.
+**Verify it worked** — open `http://localhost:9222` in another browser. You should see a JSON list of tabs. If you see "Connection Refused", repeat the kill step.
 
-**Make a permanent shortcut so you don't have to type it each time:**
-
-*macOS* — add this alias to `~/.zshrc` (open it with `nano ~/.zshrc`):
+*macOS alias* — add to `~/.zshrc`:
 ```bash
 alias chrome-agent='pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
 ```
-Run `source ~/.zshrc` once. Then just type `chrome-agent` in Terminal.
 
-*Windows* — create a file called `chrome-agent.bat` on your desktop with these contents:
+*Windows .bat file* — create `chrome-agent.bat` on your desktop:
 ```batch
 @echo off
 taskkill /F /IM chrome.exe /T 2>nul
 timeout /t 2 /nobreak >nul
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
-Double-click `chrome-agent.bat` whenever you need it.
 
 **Step 2 — Tell the agent to connect:**
 ```
@@ -361,7 +385,9 @@ open_browser(browser="chrome", cdp_url="http://localhost:9222")
 
 ### Firefox
 
-Firefox does not support CDP connections in Playwright. Instead of a debug port, Firefox uses **profile mode** — the agent launches Firefox using your existing profile, so all your logins and cookies are already there.
+Firefox does not support CDP connections in Playwright. It uses **profile mode only** — the agent loads your existing Firefox profile so all your logins and cookies are there.
+
+> **Important:** Playwright ships its own Firefox Nightly build as the automation engine. The browser window will show "Firefox Nightly" — this is always the case with Playwright and is not a misconfiguration. Your real Firefox logins and cookies from your standard Firefox profile are loaded and fully functional. The "Nightly" label is cosmetic only.
 
 **Step 0 — One-time Playwright setup** (only needed once):
 ```bash
@@ -393,55 +419,66 @@ open_browser(browser="firefox", profile_path="~/Library/Application Support/Fire
 
 ### Microsoft Edge
 
-Edge is Chromium-based and has the same single-instance enforcement as Chrome — kill first, then relaunch.
+#### Profile mode (recommended)
 
-**Step 1 — Kill Edge and relaunch with the debug flag**
+**Step 1 — Quit Edge completely.**
 
-**Windows — run in Command Prompt:**
+**Step 2 — Tell the agent to open Edge:**
+```
+open_browser(browser="edge", profile_path="auto")
+```
+
+`profile_path="auto"` finds your Edge user data directory automatically:
+- Windows: `%LOCALAPPDATA%\Microsoft\Edge\User Data`
+- macOS: `~/Library/Application Support/Microsoft Edge`
+
+---
+
+#### CDP mode (fallback)
+
+Edge has the same single-instance enforcement as Chrome — kill first, then relaunch.
+
+Windows:
 ```batch
 taskkill /F /IM msedge.exe /T 2>nul
 timeout /t 2 /nobreak >nul
 "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 ```
 
-**macOS — run in Terminal:**
+macOS:
 ```bash
 pkill -a -i "Microsoft Edge" 2>/dev/null; sleep 1.5; /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
 ```
 
-**Verify it worked** — open `http://localhost:9222` in another browser to see a JSON list of tabs.
-
-**Make a permanent shortcut:**
-
-*macOS* — add to `~/.zshrc`:
+*macOS alias:*
 ```bash
 alias edge-agent='pkill -a -i "Microsoft Edge" 2>/dev/null; sleep 1.5; /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222'
 ```
 
-*Windows* — create `edge-agent.bat` on your desktop:
+*Windows .bat file:*
 ```batch
 @echo off
 taskkill /F /IM msedge.exe /T 2>nul
 timeout /t 2 /nobreak >nul
 "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 ```
-Double-click `edge-agent.bat` whenever you need it.
 
-**Step 2 — Tell the agent to connect:**
+Tell the agent to connect:
 ```
 open_browser(browser="edge", cdp_url="http://localhost:9222")
 ```
 
 ---
 
-### Tips for CDP mode
+### Tips
 
-- **Kill, don't just quit** — Chrome and Edge enforce single-instance rules. Background helper processes can survive a normal Cmd+Q and silently block the debug port. Use the `pkill` / `taskkill` commands above rather than just closing the window or using Cmd+Q.
-- **Your logins are not lost** — cookies and sessions are stored in the profile on disk. Relaunching with the flag reloads the same profile.
-- **Close it when done** — once finished, quit the browser and reopen it normally (without the flag) to stop the debug port.
-- **Port 9222 is the default** — any unused port works. If you change it, update the `cdp_url` to match (e.g. `http://localhost:9333`).
-- **Only one browser can use a port at a time** — don't run two browsers on the same port.
-- **You can watch the agent work** — the new tab opens in your own browser window so you can see every action in real time.
+- **Profile mode: quit completely first** — the profile directory is locked while the browser is open. Quit fully (Cmd+Q on Mac, not just close the window) before calling `open_browser`. You'll get a clear error message if the lock is still held.
+- **Your logins are not lost** — cookies and sessions live on disk in the profile folder and are still there after you quit.
+- **You can watch the agent work** — the browser opens visibly so you can see every action in real time.
+- **CDP fallback tips:**
+  - Kill all processes first (use `pkill` / `taskkill`, not just Cmd+Q) — ghost helper processes block the debug port
+  - Verify the port opened at `http://localhost:9222` before connecting
+  - Port 9222 is the default; any unused port works if you update `cdp_url` to match
 
 ---
 
@@ -607,9 +644,13 @@ open_browser(browser="firefox", profile_path="auto")
 
 This launches Firefox with your existing profile (all logins and cookies intact). Firefox must be fully closed first (Cmd+Q on Mac).
 
-**Firefox opens with the wrong profile (e.g. Nightly instead of standard Firefox)**
+**Firefox always opens as "Firefox Nightly"**
 
-`profile_path="auto"` skips profiles with "nightly" or "dev-edition" in the path. If it still picks the wrong one, the response shows which profile name was selected — use that to diagnose. Then pass the profile path explicitly:
+This is expected and unavoidable — Playwright ships a Firefox Nightly build as its bundled automation engine. The "Firefox Nightly" label comes from the Playwright binary, not from your profile. Your actual Firefox profile data (logins, cookies, bookmarks) is still loaded correctly from your standard Firefox profile. There is no fix; this is a Playwright limitation.
+
+**Firefox profile auto-detection picks the wrong profile**
+
+`profile_path="auto"` skips profiles with "nightly" or "dev-edition" in the path and prefers `.default-release` profiles. If it still picks the wrong one, the response includes the profile folder name — check it. Then pass the path explicitly:
 
 - macOS: `~/Library/Application Support/Firefox/Profiles/` — find the subfolder ending in `.default-release`
 - Windows: `%APPDATA%\Mozilla\Firefox\Profiles\` — find the subfolder ending in `.default-release`
