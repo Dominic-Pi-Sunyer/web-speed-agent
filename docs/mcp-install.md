@@ -289,6 +289,19 @@ Once connected, the AI can use these tools automatically — you don't need to c
 
 By default the agent launches a fresh Playwright browser. For sites that detect automation — e-commerce checkouts, social networks, dashboards — you can instead **attach to your own running Chrome, Firefox, or Edge**. No new window opens, you stay logged in, and the site sees your real browser fingerprint.
 
+### Is the remote debugging port safe?
+
+**Yes — it only listens on your own machine.** All three browsers bind `--remote-debugging-port` to `localhost` (`127.0.0.1`) by default, not to your network interface. This means:
+
+- ✅ Other devices on your WiFi or local network **cannot reach it**
+- ✅ It is invisible to the internet
+- ⚠️ Any other application running locally on your machine can connect to it while the port is open
+- ⚠️ A malicious website could theoretically attempt a DNS rebinding attack (a sophisticated, uncommon technique)
+
+**Best practice:** only run the browser with the debug flag while you are actively using the agent. When you are done, close it and reopen your browser normally (without the flag). Don't leave it running overnight or when you're not using it.
+
+---
+
 ### How it works
 
 1. Close your browser completely
@@ -302,15 +315,27 @@ The agent opens a **new tab** in your running browser. When it calls `close_brow
 
 ### Chrome
 
-**macOS — run in Terminal:**
+**macOS**
+
+Run this in Terminal each time you want to use the agent:
 ```bash
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
-**Windows — run in Command Prompt:**
+To avoid typing it every time, add a shortcut alias to your shell profile. Open `~/.zshrc` (or `~/.bash_profile`) in a text editor and add:
+```bash
+alias chrome-agent='/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
+```
+Then run `source ~/.zshrc` once. After that, typing `chrome-agent` in Terminal launches Chrome with the debug port ready.
+
+**Windows**
+
+Run this in Command Prompt each time:
 ```batch
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
+
+To make a permanent shortcut: right-click your desktop → New → Shortcut → paste the full command above as the target → name it "Chrome (Agent)". Double-click it whenever you want to use the agent.
 
 Then tell the agent:
 ```
@@ -323,21 +348,31 @@ open_browser(browser="chrome", cdp_url="http://localhost:9222")
 
 Firefox requires the `--no-remote` flag. Without it, the command hands off to an already-running Firefox process that doesn't have the debug port open, and the connection will fail.
 
-**macOS — run in Terminal:**
+Also run this one-time setup if you haven't already:
+```bash
+playwright install firefox
+```
+
+**macOS**
+
+Run in Terminal each time:
 ```bash
 /Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote
 ```
 
-**Windows — run in Command Prompt:**
+Optional shortcut alias — add to `~/.zshrc`:
+```bash
+alias firefox-agent='/Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote'
+```
+
+**Windows**
+
+Run in Command Prompt each time:
 ```batch
 "C:\Program Files\Mozilla Firefox\firefox.exe" --remote-debugging-port=9222 --no-remote
 ```
 
-Also make sure the Firefox Playwright browser is installed (one-time setup):
-
-```bash
-playwright install firefox
-```
+Desktop shortcut: right-click desktop → New → Shortcut → paste the full command above as the target → name it "Firefox (Agent)".
 
 Then tell the agent:
 ```
@@ -350,14 +385,25 @@ open_browser(browser="firefox", cdp_url="http://localhost:9222")
 
 Edge is Chromium-based and works the same as Chrome.
 
-**Windows — run in Command Prompt:**
+**Windows**
+
+Run in Command Prompt each time:
 ```batch
 "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 ```
 
-**macOS — run in Terminal:**
+Desktop shortcut: right-click desktop → New → Shortcut → paste the full command above as the target → name it "Edge (Agent)".
+
+**macOS**
+
+Run in Terminal each time:
 ```bash
 /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
+```
+
+Optional shortcut alias — add to `~/.zshrc`:
+```bash
+alias edge-agent='/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222'
 ```
 
 Then tell the agent:
@@ -371,6 +417,7 @@ open_browser(browser="edge", cdp_url="http://localhost:9222")
 
 - **Your logins are preserved** — cookies live in the browser profile, not the debug session. Relaunching with the flag does not log you out.
 - **Close the browser fully first** — if Chrome or Edge is already running, the new command won't open a second instance. Close it, then run the command.
+- **Close it when done** — once you're finished with the agent, close the browser and reopen it normally (without the flag) to stop the debug port.
 - **Port 9222 is the default** — any unused port works. If you change it, update the `cdp_url` to match (e.g. `http://localhost:9333`).
 - **Only one browser can use a port at a time** — don't run two browsers on the same port.
 - **You can watch the agent work** — the new tab opens in your own browser window and you can see every action in real time.
