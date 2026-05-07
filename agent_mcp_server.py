@@ -45,6 +45,34 @@ SERVER_URL  = os.getenv("WEBSPEED_SERVER_URL", "https://api.getwebspeed.io")
 SESSIONS    = Path("~/.webspeed/sessions").expanduser()
 HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"
 
+# ── stealth browser config ────────────────────────────────────────────────────
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+_CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-extensions",
+    "--disable-plugins",
+    "--disable-background-networking",
+    "--no-first-run",
+    "--disable-dev-shm-usage",
+]
+
+# Masks headless browser signals before any page script runs
+_STEALTH_INIT = """\
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
+Object.defineProperty(navigator, 'plugins', {get: () => [
+  {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+  {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: ''},
+  {name: 'Native Client', filename: 'internal-nacl-plugin', description: ''}
+]});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+"""
+
 # ── global browser state (persists across tool calls in this process) ─────────
 
 _pw       = None   # playwright instance
@@ -123,9 +151,18 @@ async def open_browser(
     try:
         _pw = await async_playwright().start()
         run_headless = headless if headless is not None else HEADLESS
-        _browser = await _pw.chromium.launch(headless=run_headless)
+        _browser = await _pw.chromium.launch(headless=run_headless, args=_CHROMIUM_ARGS)
 
-        ctx_opts: dict[str, Any] = {}
+        ctx_opts: dict[str, Any] = {
+            "user_agent": _USER_AGENT,
+            "viewport": {"width": 1920, "height": 1080},
+            "extra_http_headers": {
+                "Accept-Language": "en-US,en;q=0.9",
+                "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            },
+        }
         _session_name = session_name
 
         if session_name:
@@ -141,6 +178,7 @@ async def open_browser(
                 ctx_opts["storage_state"] = str(storage_file)
 
         _context = await _browser.new_context(**ctx_opts)
+        await _context.add_init_script(_STEALTH_INIT)
         _page = await _context.new_page()
 
         msg = f"Browser opened"
