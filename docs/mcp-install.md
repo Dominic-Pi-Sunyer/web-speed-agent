@@ -306,8 +306,8 @@ By default the agent launches a fresh Playwright browser. For sites that detect 
 
 The debug port has to be enabled when the browser **starts** — you cannot attach it to an already-running browser. The workflow is always:
 
-1. **Quit your browser completely** (Cmd+Q on Mac, not just close the window)
-2. Relaunch it with the debug flag using the command for your browser below
+1. **Kill all browser processes** — simply quitting isn't always enough. Chrome and Edge enforce single-instance rules, and background helper processes can stay alive and silently block the debug port. Use the kill commands in the browser-specific sections below.
+2. Relaunch with the debug flag using the command for your browser below
 3. Your logins and cookies are still there — they are stored in your browser profile on disk, not in the running process. The browser loads the same profile on restart.
 4. Tell the agent to connect
 
@@ -317,31 +317,40 @@ The agent opens a **new tab** in your relaunched browser. When it calls `close_b
 
 ### Chrome
 
-**Step 1 — Quit Chrome completely**, then:
+**Step 1 — Kill Chrome and relaunch with the debug flag**
+
+Chrome only opens the debug port if it is the *first* Chrome process to start. Any existing Chrome window, background helper, or ghost process will silently prevent the port from opening. Kill first, then relaunch:
 
 **macOS — run in Terminal:**
 ```bash
-/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
 **Windows — run in Command Prompt:**
 ```batch
+taskkill /F /IM chrome.exe /T 2>nul
+timeout /t 2 /nobreak >nul
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
+
+**Verify it worked** — open `http://localhost:9222` in another browser. You should see a JSON list of open tabs. If you see "Connection Refused", a Chrome process is still running — repeat the kill step.
 
 **Make a permanent shortcut so you don't have to type it each time:**
 
 *macOS* — add this alias to `~/.zshrc` (open it with `nano ~/.zshrc`):
 ```bash
-alias chrome-agent='/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
+alias chrome-agent='pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
 ```
 Run `source ~/.zshrc` once. Then just type `chrome-agent` in Terminal.
 
-*Windows* — right-click your desktop → New → Shortcut → paste this as the target:
-```
+*Windows* — create a file called `chrome-agent.bat` on your desktop with these contents:
+```batch
+@echo off
+taskkill /F /IM chrome.exe /T 2>nul
+timeout /t 2 /nobreak >nul
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
-Name it "Chrome (Agent)" and double-click it whenever you need it.
+Double-click `chrome-agent.bat` whenever you need it.
 
 **Step 2 — Tell the agent to connect:**
 ```
@@ -384,28 +393,39 @@ open_browser(browser="firefox", profile_path="~/Library/Application Support/Fire
 
 ### Microsoft Edge
 
-Edge is Chromium-based and works identically to Chrome.
+Edge is Chromium-based and has the same single-instance enforcement as Chrome — kill first, then relaunch.
 
-**Step 1 — Quit Edge completely**, then:
+**Step 1 — Kill Edge and relaunch with the debug flag**
 
 **Windows — run in Command Prompt:**
 ```batch
+taskkill /F /IM msedge.exe /T 2>nul
+timeout /t 2 /nobreak >nul
 "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 ```
 
 **macOS — run in Terminal:**
 ```bash
-/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
+pkill -a -i "Microsoft Edge" 2>/dev/null; sleep 1.5; /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
 ```
+
+**Verify it worked** — open `http://localhost:9222` in another browser to see a JSON list of tabs.
 
 **Make a permanent shortcut:**
 
 *macOS* — add to `~/.zshrc`:
 ```bash
-alias edge-agent='/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222'
+alias edge-agent='pkill -a -i "Microsoft Edge" 2>/dev/null; sleep 1.5; /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222'
 ```
 
-*Windows* — right-click desktop → New → Shortcut → paste the full command → name it "Edge (Agent)".
+*Windows* — create `edge-agent.bat` on your desktop:
+```batch
+@echo off
+taskkill /F /IM msedge.exe /T 2>nul
+timeout /t 2 /nobreak >nul
+"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+```
+Double-click `edge-agent.bat` whenever you need it.
 
 **Step 2 — Tell the agent to connect:**
 ```
@@ -416,7 +436,7 @@ open_browser(browser="edge", cdp_url="http://localhost:9222")
 
 ### Tips for CDP mode
 
-- **Quit, don't just close** — on Mac, Cmd+Q quits; clicking the red dot just closes the window. The browser must be fully quit before relaunching with the flag.
+- **Kill, don't just quit** — Chrome and Edge enforce single-instance rules. Background helper processes can survive a normal Cmd+Q and silently block the debug port. Use the `pkill` / `taskkill` commands above rather than just closing the window or using Cmd+Q.
 - **Your logins are not lost** — cookies and sessions are stored in the profile on disk. Relaunching with the flag reloads the same profile.
 - **Close it when done** — once finished, quit the browser and reopen it normally (without the flag) to stop the debug port.
 - **Port 9222 is the default** — any unused port works. If you change it, update the `cdp_url` to match (e.g. `http://localhost:9333`).
@@ -551,11 +571,29 @@ python -m playwright install firefox   # only if you use Firefox
 
 ---
 
-**"Could not connect to Chrome/Edge at http://localhost:9222"**
+**"Could not connect to Chrome/Edge at http://localhost:9222" / port shows "Connection Refused"**
 
-- Chrome and Edge must be **fully closed** before relaunching with `--remote-debugging-port`. If they're already open, the new command attaches to the existing process (which doesn't have the flag).
-- Verify Chrome is running with the flag: open `http://localhost:9222` in another browser — you should see a JSON response listing open tabs.
-- Check nothing else is using port 9222: `lsof -i :9222` (Mac/Linux) or `netstat -ano | findstr :9222` (Windows).
+The most common cause is Chrome's single-instance enforcement: any Chrome process running when you launched the command caused the flag to be silently ignored. The port never opened.
+
+**Fix — kill everything, then relaunch:**
+
+macOS (Chrome):
+```bash
+pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5; /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+```
+
+Windows (Chrome):
+```batch
+taskkill /F /IM chrome.exe /T 2>nul
+timeout /t 2 /nobreak >nul
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+```
+
+**Verify:** open `http://localhost:9222` in another browser — you should see a JSON list of tabs, not "Connection Refused".
+
+If still failing:
+- Check for stray processes: `lsof -i :9222` (Mac) or `netstat -ano | findstr :9222` (Windows)
+- Open Activity Monitor (Mac) or Task Manager (Windows) and confirm no Chrome/Edge processes remain before relaunching
 
 ---
 

@@ -267,20 +267,37 @@ async def open_browser(
             try:
                 _browser = await engine.connect_over_cdp(cdp_url)
             except Exception as exc:
-                tips = {
+                kill_tips = {
                     "chrome": (
-                        "macOS:   /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n"
-                        'Windows: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
+                        "Most likely cause: an existing Chrome process was running when you launched with\n"
+                        "--remote-debugging-port, so Chrome silently ignored the flag and the port never\n"
+                        "opened (single-instance enforcement + background helper processes).\n\n"
+                        "Kill ALL Chrome processes first, then relaunch:\n\n"
+                        "macOS:\n"
+                        '  pkill -a -i "Google Chrome" 2>/dev/null; sleep 1.5;\n'
+                        "  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222\n\n"
+                        "Windows:\n"
+                        "  taskkill /F /IM chrome.exe /T\n"
+                        '  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
                     ),
                     "edge": (
-                        'Windows: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222\n'
-                        "macOS:   /Applications/Microsoft\\ Edge.app/Contents/MacOS/Microsoft\\ Edge --remote-debugging-port=9222"
+                        "Most likely cause: an existing Edge process was running when you launched with\n"
+                        "--remote-debugging-port, so Edge silently ignored the flag and the port never\n"
+                        "opened (single-instance enforcement + background helper processes).\n\n"
+                        "Kill ALL Edge processes first, then relaunch:\n\n"
+                        "Windows:\n"
+                        "  taskkill /F /IM msedge.exe /T\n"
+                        '  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222\n\n'
+                        "macOS:\n"
+                        '  pkill -a -i "Microsoft Edge" 2>/dev/null; sleep 1.5;\n'
+                        "  /Applications/Microsoft\\ Edge.app/Contents/MacOS/Microsoft\\ Edge --remote-debugging-port=9222"
                     ),
-                }.get(bname, "")
+                }.get(bname, f"Make sure {browser} is fully closed, then relaunch with --remote-debugging-port=9222.")
                 return _err(
                     f"Could not connect to {browser} at {cdp_url}: {exc}\n\n"
-                    f"Make sure {browser} is fully closed, then relaunch it with:\n"
-                    + tips
+                    + kill_tips
+                    + "\n\nVerify the port opened: open http://localhost:9222 in another browser — "
+                    "you should see a JSON list of open tabs, not 'Connection Refused'."
                 )
 
             contexts = _browser.contexts
