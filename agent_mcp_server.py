@@ -209,10 +209,16 @@ def _get_browser_type(browser: str, pw: Any):
 def _read_firefox_cookies(profile_dir: Path) -> list[dict]:
     """Read cookies from Firefox's cookies.sqlite as a read-only snapshot.
 
+    SECURITY: cookies stay on-device. They are injected into the local
+    Playwright browser context and only ever transmitted to the target
+    websites as normal HTTP request headers — identical to regular browsing.
+    They are NEVER sent to the Web Speed API or any third party.
+    read_page() only sends page HTML to the API, not cookies.
+
     Works whether or not Firefox is running — we copy the file to a temp
     location first so we never touch or lock the real database.
-    Firefox cookies are not encrypted (unlike Chrome), so the values are
-    directly usable.
+    Firefox cookies are not encrypted (unlike Chrome), so values are
+    directly readable from the SQLite file.
     """
     cookies_db = profile_dir / "cookies.sqlite"
     if not cookies_db.exists():
@@ -803,20 +809,48 @@ async def click(
 
 
 @mcp.tool()
-async def fill_field(selector: str, value: str, press_tab: bool = False) -> str:
+async def fill_field(
+    selector: str,
+    value: str,
+    press_tab: bool = False,
+    use_keyboard: bool = False,
+    delay_ms: int = 0,
+) -> str:
     """Type a value into a form field.
 
+    **Standard mode** (`use_keyboard=False`, default): sets the field value
+    directly. Works for plain `<input>` and `<textarea>` elements.
+
+    **Keyboard mode** (`use_keyboard=True`): simulates real keystrokes
+    (keydown → keypress → input → keyup per character). Use this for:
+    - `contenteditable` divs (X/Twitter post box, Notion, Slack, etc.)
+    - React / Vue inputs that ignore programmatic `.value` changes
+    - Sites that check for "trusted" input events to prevent botting
+
+    For X (Twitter): click the "What's happening?" box first, then call
+    `fill_field` with `use_keyboard=True`. This fires the React-compatible
+    events that enable the Post button.
+
     Args:
-        selector: CSS selector for the input field.
+        selector: CSS selector for the input or contenteditable element.
         value: Text to type.
-        press_tab: Press Tab after filling (useful to trigger field validation).
+        press_tab: Press Tab after filling (triggers field validation).
+        use_keyboard: Simulate real keystrokes instead of direct fill.
+        delay_ms: Milliseconds between keystrokes in keyboard mode.
+                  0 = fast (default). Use 30–80 for sites that check
+                  typing cadence.
     """
     page = _require_page()
     try:
-        await page.fill(selector, value, timeout=8_000)
+        if use_keyboard:
+            locator = page.locator(selector).first
+            await locator.press_sequentially(value, delay=delay_ms)
+        else:
+            await page.fill(selector, value, timeout=8_000)
         if press_tab:
             await page.keyboard.press("Tab")
-        return _ok({"message": f"Filled '{selector}' with value"})
+        mode = "keyboard" if use_keyboard else "fill"
+        return _ok({"message": f"Filled '{selector}' ({mode} mode)"})
     except Exception as exc:
         return _err(f"Could not fill '{selector}': {exc}")
 

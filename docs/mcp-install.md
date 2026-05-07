@@ -270,7 +270,7 @@ Once connected, the AI can use these tools automatically — you don't need to c
 | `login` | Fill and submit a login form |
 | `read_page` | Extract structured data from the current page (costs 1 credit) |
 | `click` | Click a button or link by CSS selector |
-| `fill_field` | Type into a form field |
+| `fill_field` | Type into a form field. Pass `use_keyboard=True` for React/contenteditable inputs (X tweet box, Notion, Slack, etc.) |
 | `submit_form` | Submit a form |
 | `get_page_info` | Get the current URL, title, and visible text |
 | `wait_for_element` | Wait for an element to appear, disappear, or change state |
@@ -380,6 +380,14 @@ timeout /t 2 /nobreak >nul
 ```
 open_browser(browser="chrome", cdp_url="http://localhost:9222")
 ```
+
+---
+
+### Cookie safety
+
+When you use `profile_path=` for any browser, cookies are read from your local browser profile and injected into the local Playwright browser. They are **only ever transmitted to the target websites** as normal HTTP request headers — exactly as if you were browsing normally. They are never sent to the Web Speed API or any third party. The `read_page` call only sends the page's HTML content to the API, not your cookies.
+
+For Firefox specifically, the profile database is copied to a temporary file and read there — the original `cookies.sqlite` on disk is never modified.
 
 ---
 
