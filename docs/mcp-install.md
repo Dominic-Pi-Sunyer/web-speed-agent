@@ -38,15 +38,18 @@ pip3 install "web-speed-agent[mcp]"
 playwright install chromium
 ```
 
-**Windows:**
+**Windows — IMPORTANT: Use the full Python path**
+
+Open **Command Prompt** (not PowerShell) and run these commands. Replace the path with your actual Python location (find it with `where python`):
+
+```batch
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install "web-speed-agent[mcp]"
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m playwright install chromium
 ```
-pip install "web-speed-agent[mcp]"
-python -m playwright install chromium
-```
+
+> **Why the full path?** Windows has multiple Python versions, and `python` or `python3` commands can pick the wrong one or fail. Using the full path ensures you're installing into the correct Python version.
 
 The `[mcp]` extra installs the MCP SDK that the server needs to talk to Claude Desktop and other AI clients.
-
-> **Windows tip:** Always use `python -m playwright` on Windows — the plain `playwright` command is often not found even after install.
 
 ---
 
@@ -90,13 +93,16 @@ This opens the config file in your default text editor. Add the `web-speed-agent
 }
 ```
 
-**Windows:**
+**Windows — IMPORTANT: Use the full Python path for `command`**
+
+Don't use `python` or `python3` — instead use the **full path** to the Python executable where you installed the package. Find your Python path by running `where python` in Command Prompt.
+
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
-      "command": "python",
-      "args": ["C:/Users/YourName/tools/agent_mcp_server.py"],
+      "command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe",
+      "args": ["D:/Web Speed testing/agent_mcp_server.py"],
       "env": {
         "WEBSPEED_API_KEY": "wsp_your_key_here"
       }
@@ -105,7 +111,10 @@ This opens the config file in your default text editor. Add the `web-speed-agent
 }
 ```
 
-> **Windows path format:** Use forward slashes (`C:/Users/...`) or escaped backslashes (`C:\\Users\\...`) in JSON. Regular backslashes will cause an error.
+> **Why the full path?** Windows has multiple Python versions and the `python` / `python3` commands don't always work reliably. The full path ensures Claude Desktop uses the correct Python that has `web-speed-agent` installed.
+>
+> **Path format:** Use forward slashes (`C:/Users/...`) or escaped backslashes (`C:\\Users\\...`) in JSON. Regular backslashes will cause an error.
+> **File path:** Make sure the `agent_mcp_server.py` path is also absolute and uses forward slashes.
 
 Save the file and **restart Claude Desktop** (quit fully from the system tray, then reopen). You should see "web-speed-agent" listed under connected tools in Settings → Developer.
 
@@ -118,16 +127,24 @@ Save the file and **restart Claude Desktop** (quit fully from the system tray, t
 claude mcp add web-speed-agent python3 /Users/yourname/tools/agent_mcp_server.py
 ```
 
-**Windows** — run this once:
+**Windows** — run this once (use the full Python path):
 ```
-claude mcp add web-speed-agent python C:/Users/YourName/tools/agent_mcp_server.py
+claude mcp add web-speed-agent "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe" "C:/Users/YourName/tools/agent_mcp_server.py"
 ```
 
-Then set your API key. Add this to your shell profile (`~/.zshrc`, `~/.bashrc`) on Mac/Linux, or set it as a Windows environment variable in System Properties:
+Then set your API key. Add this to your shell profile (`~/.zshrc`, `~/.bashrc`) on Mac/Linux, or set it as a Windows environment variable:
 
+**macOS / Linux:**
 ```bash
 export WEBSPEED_API_KEY="wsp_your_key_here"
 ```
+
+**Windows (Command Prompt):**
+```batch
+setx WEBSPEED_API_KEY "wsp_your_key_here"
+```
+
+Then restart your terminal or Command Prompt for the variable to take effect.
 
 ---
 
@@ -150,12 +167,12 @@ Open `~/.gemini/settings.json` and add:
 }
 ```
 
-**Windows:**
+**Windows — use the full Python path:**
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
-      "command": "python",
+      "command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe",
       "args": ["C:/Users/YourName/tools/agent_mcp_server.py"],
       "env": {
         "WEBSPEED_API_KEY": "wsp_your_key_here"
@@ -216,12 +233,34 @@ View your balance and top up at **[getwebspeed.io/account](https://getwebspeed.i
 
 ## Troubleshooting
 
+**Claude Desktop keeps disconnecting (Windows)**
+The most common cause: you're using `python` or `python3` as the `command` instead of the **full path**. On Windows, the short command names are unreliable. 
+
+**Fix:** Go to Settings → Developer → Edit Config and change:
+```json
+"command": "python"
+```
+to:
+```json
+"command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe"
+```
+
+Get your exact Python path by running `where python` in Command Prompt. Then use the **full path** in your config — this is required on Windows.
+
 **"No module named 'mcp'"**
-The MCP SDK wasn't installed. Re-run the install with the `[mcp]` extra using the same Python that runs your MCP server:
+The MCP SDK wasn't installed. Re-run the install with the `[mcp]` extra using the **same Python** that your config's `command` field points to.
+
+**Windows:** Find your Python path with `where python`, then install using the full path:
+```batch
+C:\Users\YourName\AppData\Local\Programs\Python\Python313\python.exe -m pip install "web-speed-agent[mcp]"
 ```
-python -m pip install "web-speed-agent[mcp]"
+
+**Mac/Linux:**
+```bash
+pip3 install "web-speed-agent[mcp]"
 ```
-On Mac/Linux: `pip3 install "web-speed-agent[mcp]"`
+
+The Python in your config's `command` field must be the same one where you ran the install.
 
 **Wrong Python version — "No module named ..." after install**
 Windows often has multiple Python versions installed. If you installed the package using Python 3.13 but your config points at Python 3.9, the packages won't be found. Always use the same Python executable in your config that you used to run `pip install`. Find the right path:
