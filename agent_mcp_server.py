@@ -643,8 +643,16 @@ async def open_browser(
                     ),
                 })
 
-            elif bname in ("chrome", "chromium", "edge"):
-                # ── Profile mode: Chrome / Edge with real user profile ────────
+            elif bname == "chrome":
+                return _err(
+                    "Chrome only supports CDP mode — profile_path is not used.\n\n"
+                    "Start Chrome with 'chrome-agent' in Terminal, then call:\n"
+                    "  open_browser(browser='chrome')\n\n"
+                    "The agent connects automatically to your running Chrome window."
+                )
+
+            elif bname in ("chromium", "edge"):
+                # ── Profile mode: Chromium / Edge with real user profile ──────
                 # We intentionally do NOT pass channel="chrome"/"msedge" here.
                 # System Chrome refuses remote debugging on its default user data
                 # directory ("DevTools remote debugging requires a non-default data
@@ -722,11 +730,21 @@ async def open_browser(
 
         else:
             # ── Standard mode: launch a fresh browser ─────────────────────────
+            # Chrome is not available here — it is handled exclusively via CDP
+            # (the auto-CDP block above catches all Chrome calls and either
+            # connects or returns an error before reaching this branch).
+            if bname == "chrome":
+                return _err(
+                    "Chrome only supports CDP mode.\n\n"
+                    "Start Chrome with 'chrome-agent' in Terminal, then call:\n"
+                    "  open_browser(browser='chrome')"
+                )
+
             _cdp_mode = False
             _persistent_ctx = False
             run_headless = headless if headless is not None else HEADLESS
 
-            if bname in ("chrome", "chromium"):
+            if bname == "chromium":
                 _browser = await engine.launch(
                     headless=run_headless, args=_CHROMIUM_ARGS
                 )
@@ -984,14 +1002,24 @@ async def fill_field(
 
     Args:
         selector: CSS selector for the input or contenteditable element.
-        value: Text to type.
-        press_tab: Press Tab after filling (triggers field validation).
+        value: Text to type. Never include \\n — it will be stripped.
+               A trailing \\n is treated as Tab (advance to next field).
+        press_tab: Press Tab after filling to move focus to the next field.
         use_keyboard: Simulate real keystrokes instead of direct fill.
         delay_ms: Milliseconds between keystrokes in keyboard mode.
                   0 = fast (default). Use 30–80 for sites that check
                   typing cadence.
     """
     page = _require_page()
+
+    # Strip literal \n from values — they must never appear in form inputs.
+    # A trailing \n is interpreted as "advance to next field" (Tab press).
+    if "\n" in value:
+        clean = value.rstrip("\n")
+        if len(clean) < len(value):
+            press_tab = True        # trailing \n → advance focus via Tab
+        value = clean.replace("\n", " ")   # mid-string \n → space
+
     try:
         if use_keyboard:
             locator = page.locator(selector).first
