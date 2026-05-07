@@ -24,8 +24,10 @@ Add to Claude Code:
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
+import platform
 import re
 import stat
 import sys
@@ -80,17 +82,65 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 
 # ── global browser state (persists across tool calls in this process) ─────────
 
-_pw           = None   # playwright instance
-_browser      = None   # Browser
-_context      = None   # BrowserContext
-_page         = None   # Page  (the active tab)
-_session_name: str | None = None
-_cdp_mode:    bool = False   # True when connected to an existing browser via CDP
-_browser_name: str = "chrome"  # "chrome" | "firefox" | "edge"
+_pw             = None   # playwright instance
+_browser        = None   # Browser (None in persistent-context mode)
+_context        = None   # BrowserContext
+_page           = None   # Page  (the active tab)
+_session_name:  str | None = None
+_cdp_mode:      bool = False   # True when connected to an existing browser via CDP
+_persistent_ctx: bool = False  # True when using launch_persistent_context (Firefox profile)
+_browser_name:  str = "chrome"  # "chrome" | "firefox" | "edge"
 
 mcp = FastMCP("web-speed-agent")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _resolve_firefox_profile(path: str) -> Path | None:
+    """Return a Firefox profile directory path.
+
+    Pass "auto" to find the default profile from profiles.ini,
+    or pass an explicit path string.
+    """
+    if path != "auto":
+        p = Path(path).expanduser()
+        return p if p.exists() else None
+
+    system = platform.system()
+    if system == "Darwin":
+        base = Path.home() / "Library" / "Application Support" / "Firefox"
+    elif system == "Windows":
+        base = Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox"
+    else:
+        base = Path.home() / ".mozilla" / "firefox"
+
+    ini = base / "profiles.ini"
+    if not ini.exists():
+        return None
+
+    cfg = configparser.ConfigParser()
+    cfg.read(ini)
+
+    # Prefer the section explicitly marked Default=1
+    for section in cfg.sections():
+        if cfg.get(section, "Default", fallback="") == "1":
+            raw = cfg.get(section, "Path", fallback="")
+            relative = cfg.get(section, "IsRelative", fallback="1") == "1"
+            if raw:
+                p = (base / raw) if relative else Path(raw)
+                if p.exists():
+                    return p
+
+    # Fallback: first profile directory that exists on disk
+    for section in cfg.sections():
+        raw = cfg.get(section, "Path", fallback="")
+        relative = cfg.get(section, "IsRelative", fallback="1") == "1"
+        if raw:
+            p = (base / raw) if relative else Path(raw)
+            if p.exists():
+                return p
+
+    return None
+
 
 def _get_browser_type(browser: str, pw: Any):
     """Return the Playwright browser-type object for the requested browser."""
@@ -151,47 +201,42 @@ async def open_browser(
     session_name: str | None = None,
     headless: bool | None = None,
     cdp_url: str | None = None,
+    profile_path: str | None = None,
 ) -> str:
     """Open a browser for automation.
 
     **browser** — which browser to use: "chrome" (default), "firefox", or "edge".
 
-    ── Standard mode (default) ──────────────────────────────────────────────────
-    Launches a fresh Playwright-controlled browser. Use session_name to save
-    cookies and reuse them next time without logging in again.
+    ── Standard mode ────────────────────────────────────────────────────────────
+    Launches a fresh Playwright browser. Use session_name to save cookies and
+    reuse them on the next run.
 
-    ── CDP mode (attach to your existing browser) ───────────────────────────────
-    Connects to a browser you already have open and logged in. No new window,
-    no re-login, and the real browser fingerprint makes bot detection much harder.
+    ── CDP mode — Chrome / Edge only ────────────────────────────────────────────
+    Attaches to a Chrome or Edge window you already have open. No re-login
+    needed; the site sees your real browser fingerprint.
+    Relaunch the browser with --remote-debugging-port=9222 first, then pass
+    cdp_url="http://localhost:9222".
 
-    First, relaunch your browser with the remote-debugging port enabled:
+    ── Profile mode — Firefox ───────────────────────────────────────────────────
+    Firefox does not support CDP. Instead, pass profile_path="auto" to launch
+    Firefox using your existing profile (all logins and cookies are preserved).
+    Firefox must be fully closed before calling this.
 
-      Chrome / Edge — macOS:
-        /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\
-            --remote-debugging-port=9222
-      Chrome / Edge — Windows:
-        "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222
+      open_browser(browser="firefox", profile_path="auto")
 
-      Firefox — macOS:
-        /Applications/Firefox.app/Contents/MacOS/firefox \\
-            --remote-debugging-port=9222 --no-remote
-      Firefox — Windows:
-        "C:\\Program Files\\Mozilla Firefox\\firefox.exe" --remote-debugging-port=9222 --no-remote
-
-    Then call: open_browser(browser="chrome", cdp_url="http://localhost:9222")
-               open_browser(browser="firefox", cdp_url="http://localhost:9222")
-
-    The agent opens a new tab. When close_browser() is called the tab is closed
-    but the browser stays running.
+    Or pass an explicit profile directory path if "auto" doesn't find the right one.
 
     Args:
         browser: "chrome" (default), "firefox", or "edge".
-        session_name: Cookie-persist name for standard mode (ignored in CDP mode).
-        headless: Hide the window in standard mode (default False, ignored in CDP mode).
-        cdp_url: Attach to an already-running browser instead of launching one.
+        session_name: Cookie-persist name for standard mode (ignored in other modes).
+        headless: Hide the window in standard/profile mode (default False).
+        cdp_url: Chrome/Edge only — attach to an already-running browser.
                  Typically "http://localhost:9222".
+        profile_path: Firefox only — launch with an existing Firefox profile.
+                      Pass "auto" to detect the default profile automatically,
+                      or a full path to a specific profile directory.
     """
-    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _browser_name
+    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _persistent_ctx, _browser_name
 
     # Close any existing browser cleanly
     if _page or _context or _browser:
@@ -209,7 +254,16 @@ async def open_browser(
         engine = _get_browser_type(bname, _pw)
 
         if cdp_url:
-            # ── CDP mode: attach to a running browser ─────────────────────────
+            # ── CDP mode: attach to a running Chrome or Edge ──────────────────
+            if bname == "firefox":
+                return _err(
+                    "Firefox does not support CDP connections in Playwright.\n\n"
+                    "To use your existing Firefox session, use profile_path instead:\n"
+                    "  open_browser(browser='firefox', profile_path='auto')\n\n"
+                    "This launches Firefox with your existing profile so all logins "
+                    "and cookies are preserved. Firefox must be fully closed first."
+                )
+
             try:
                 _browser = await engine.connect_over_cdp(cdp_url)
             except Exception as exc:
@@ -219,27 +273,22 @@ async def open_browser(
                         'Windows: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222'
                     ),
                     "edge": (
-                        'Windows: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222'
-                    ),
-                    "firefox": (
-                        "macOS:   /Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote\n"
-                        'Windows: "C:\\Program Files\\Mozilla Firefox\\firefox.exe" --remote-debugging-port=9222 --no-remote'
+                        'Windows: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222\n'
+                        "macOS:   /Applications/Microsoft\\ Edge.app/Contents/MacOS/Microsoft\\ Edge --remote-debugging-port=9222"
                     ),
                 }.get(bname, "")
                 return _err(
                     f"Could not connect to {browser} at {cdp_url}: {exc}\n\n"
-                    f"Make sure {browser} is running with --remote-debugging-port=9222.\n"
+                    f"Make sure {browser} is fully closed, then relaunch it with:\n"
                     + tips
                 )
 
-            # Grab the user's existing context (normal browsing session)
             contexts = _browser.contexts
             _context = contexts[0] if contexts else await _browser.new_context()
-
-            # Open a fresh tab so we don't disturb the user's open pages
             _page = await _context.new_page()
             _session_name = None
             _cdp_mode = True
+            _persistent_ctx = False
 
             return _ok({
                 "message": f"Connected to existing {browser} at {cdp_url}. New tab opened.",
@@ -249,9 +298,58 @@ async def open_browser(
                 "note": "Using your real browser — already logged in, real fingerprint.",
             })
 
+        elif profile_path:
+            # ── Profile mode: Firefox with existing user profile ──────────────
+            if bname != "firefox":
+                return _err(
+                    f"profile_path is only supported for Firefox. "
+                    f"For {browser}, use cdp_url to attach to a running instance."
+                )
+
+            resolved = _resolve_firefox_profile(profile_path)
+            if resolved is None:
+                hint = (
+                    "macOS:   ~/Library/Application Support/Firefox/Profiles/<name>\n"
+                    "Windows: %APPDATA%\\Mozilla\\Firefox\\Profiles\\<name>"
+                )
+                return _err(
+                    f"Could not find Firefox profile at '{profile_path}'.\n\n"
+                    "Pass profile_path='auto' to detect it automatically, or find "
+                    "the full path to your profile folder:\n" + hint
+                )
+
+            run_headless = headless if headless is not None else HEADLESS
+            try:
+                _context = await engine.launch_persistent_context(
+                    str(resolved),
+                    headless=run_headless,
+                    viewport={"width": 1920, "height": 1080},
+                    args=["--remote-debugging-port=0"],  # ephemeral port, not exposed
+                )
+            except Exception as exc:
+                return _err(
+                    f"Could not launch Firefox with profile '{resolved}': {exc}\n\n"
+                    "Make sure Firefox is fully closed (Cmd+Q on Mac) before calling this."
+                )
+
+            await _context.add_init_script(_STEALTH_INIT)
+            _page = await _context.new_page()
+            _browser = None  # owned by the persistent context, not a separate object
+            _session_name = None
+            _cdp_mode = False
+            _persistent_ctx = True
+
+            return _ok({
+                "message": f"Firefox launched with existing profile from {resolved}.",
+                "browser": "firefox",
+                "profile": str(resolved),
+                "note": "Your existing logins and cookies are loaded.",
+            })
+
         else:
             # ── Standard mode: launch a fresh browser ─────────────────────────
             _cdp_mode = False
+            _persistent_ctx = False
             run_headless = headless if headless is not None else HEADLESS
 
             if bname in ("chrome", "chromium"):
@@ -637,13 +735,14 @@ async def close_browser() -> str:
 
     In standard mode: saves the session (if named) and closes the browser.
     """
-    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _browser_name
+    global _pw, _browser, _context, _page, _session_name, _cdp_mode, _persistent_ctx, _browser_name
 
-    was_cdp = _cdp_mode
+    was_cdp        = _cdp_mode
+    was_persistent = _persistent_ctx
     saved = False
 
     if was_cdp:
-        # CDP mode — close only the tab we opened; leave Chrome running
+        # CDP mode — close the tab we opened; leave the browser running
         try:
             if _page:
                 await _page.close()
@@ -651,7 +750,7 @@ async def close_browser() -> str:
             pass
         try:
             if _browser:
-                await _browser.close()  # disconnects from CDP, does NOT kill Chrome
+                await _browser.close()  # disconnects from CDP, does NOT kill the browser
         except Exception:
             pass
         try:
@@ -659,6 +758,20 @@ async def close_browser() -> str:
                 await _pw.stop()
         except Exception:
             pass
+
+    elif was_persistent:
+        # Profile mode — the context owns the browser; just close the context
+        try:
+            if _context:
+                await _context.close()
+        except Exception:
+            pass
+        try:
+            if _pw:
+                await _pw.stop()
+        except Exception:
+            pass
+
     else:
         # Standard mode — optionally save session, then shut down the browser
         if _context and _session_name:
@@ -684,10 +797,13 @@ async def close_browser() -> str:
 
     _page = _context = _browser = _pw = None
     _cdp_mode = False
+    _persistent_ctx = False
     _browser_name = "chrome"
 
     if was_cdp:
-        msg = "Tab closed and disconnected from Chrome (Chrome is still running)"
+        msg = "Tab closed and disconnected (browser is still running)"
+    elif was_persistent:
+        msg = "Firefox closed"
     else:
         msg = "Browser closed"
         if saved:

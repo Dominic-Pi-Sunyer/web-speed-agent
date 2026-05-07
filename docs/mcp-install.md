@@ -304,40 +304,46 @@ By default the agent launches a fresh Playwright browser. For sites that detect 
 
 ### How it works
 
-1. Close your browser completely
-2. Relaunch it with a remote-debugging port (your logins are stored in the profile — this does not log you out)
-3. Log into any sites you need as normal
-4. Tell the agent to connect: `open_browser(browser="chrome", cdp_url="http://localhost:9222")`
+The debug port has to be enabled when the browser **starts** — you cannot attach it to an already-running browser. The workflow is always:
 
-The agent opens a **new tab** in your running browser. When it calls `close_browser()`, only that tab is closed — your other tabs and your browser stay open.
+1. **Quit your browser completely** (Cmd+Q on Mac, not just close the window)
+2. Relaunch it with the debug flag using the command for your browser below
+3. Your logins and cookies are still there — they are stored in your browser profile on disk, not in the running process. The browser loads the same profile on restart.
+4. Tell the agent to connect
+
+The agent opens a **new tab** in your relaunched browser. When it calls `close_browser()`, only that tab is closed.
 
 ---
 
 ### Chrome
 
-**macOS**
+**Step 1 — Quit Chrome completely**, then:
 
-Run this in Terminal each time you want to use the agent:
+**macOS — run in Terminal:**
 ```bash
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
 ```
 
-To avoid typing it every time, add a shortcut alias to your shell profile. Open `~/.zshrc` (or `~/.bash_profile`) in a text editor and add:
-```bash
-alias chrome-agent='/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
-```
-Then run `source ~/.zshrc` once. After that, typing `chrome-agent` in Terminal launches Chrome with the debug port ready.
-
-**Windows**
-
-Run this in Command Prompt each time:
+**Windows — run in Command Prompt:**
 ```batch
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
 
-To make a permanent shortcut: right-click your desktop → New → Shortcut → paste the full command above as the target → name it "Chrome (Agent)". Double-click it whenever you want to use the agent.
+**Make a permanent shortcut so you don't have to type it each time:**
 
-Then tell the agent:
+*macOS* — add this alias to `~/.zshrc` (open it with `nano ~/.zshrc`):
+```bash
+alias chrome-agent='/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222'
+```
+Run `source ~/.zshrc` once. Then just type `chrome-agent` in Terminal.
+
+*Windows* — right-click your desktop → New → Shortcut → paste this as the target:
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
+```
+Name it "Chrome (Agent)" and double-click it whenever you need it.
+
+**Step 2 — Tell the agent to connect:**
 ```
 open_browser(browser="chrome", cdp_url="http://localhost:9222")
 ```
@@ -346,67 +352,62 @@ open_browser(browser="chrome", cdp_url="http://localhost:9222")
 
 ### Firefox
 
-Firefox requires the `--no-remote` flag. Without it, the command hands off to an already-running Firefox process that doesn't have the debug port open, and the connection will fail.
+Firefox does not support CDP connections in Playwright. Instead of a debug port, Firefox uses **profile mode** — the agent launches Firefox using your existing profile, so all your logins and cookies are already there.
 
-Also run this one-time setup if you haven't already:
+**Step 0 — One-time Playwright setup** (only needed once):
 ```bash
 playwright install firefox
 ```
 
-**macOS**
+**Step 1 — Quit Firefox completely** (Cmd+Q on Mac, not just close the window).
 
-Run in Terminal each time:
-```bash
-/Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote
+Your logins are not lost — they are stored in your Firefox profile folder on disk.
+
+**Step 2 — Tell the agent to launch Firefox with your profile:**
+```
+open_browser(browser="firefox", profile_path="auto")
 ```
 
-Optional shortcut alias — add to `~/.zshrc`:
-```bash
-alias firefox-agent='/Applications/Firefox.app/Contents/MacOS/firefox --remote-debugging-port=9222 --no-remote'
+`profile_path="auto"` automatically finds and uses your default Firefox profile. If it picks the wrong profile, find your profile folders here:
+
+- **macOS:** `~/Library/Application Support/Firefox/Profiles/`
+- **Windows:** `%APPDATA%\Mozilla\Firefox\Profiles\`
+
+Each subfolder is a separate profile (e.g. `abc123.default-release`). Pass the full path to use a specific one:
+```
+open_browser(browser="firefox", profile_path="~/Library/Application Support/Firefox/Profiles/abc123.default-release")
 ```
 
-**Windows**
-
-Run in Command Prompt each time:
-```batch
-"C:\Program Files\Mozilla Firefox\firefox.exe" --remote-debugging-port=9222 --no-remote
-```
-
-Desktop shortcut: right-click desktop → New → Shortcut → paste the full command above as the target → name it "Firefox (Agent)".
-
-Then tell the agent:
-```
-open_browser(browser="firefox", cdp_url="http://localhost:9222")
-```
+> **Firefox Nightly / Developer Edition** each have their own separate profile directory. If you regularly use Nightly, pass its profile path explicitly rather than using `"auto"`.
 
 ---
 
 ### Microsoft Edge
 
-Edge is Chromium-based and works the same as Chrome.
+Edge is Chromium-based and works identically to Chrome.
 
-**Windows**
+**Step 1 — Quit Edge completely**, then:
 
-Run in Command Prompt each time:
+**Windows — run in Command Prompt:**
 ```batch
 "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
 ```
 
-Desktop shortcut: right-click desktop → New → Shortcut → paste the full command above as the target → name it "Edge (Agent)".
-
-**macOS**
-
-Run in Terminal each time:
+**macOS — run in Terminal:**
 ```bash
 /Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222
 ```
 
-Optional shortcut alias — add to `~/.zshrc`:
+**Make a permanent shortcut:**
+
+*macOS* — add to `~/.zshrc`:
 ```bash
 alias edge-agent='/Applications/Microsoft\ Edge.app/Contents/MacOS/Microsoft\ Edge --remote-debugging-port=9222'
 ```
 
-Then tell the agent:
+*Windows* — right-click desktop → New → Shortcut → paste the full command → name it "Edge (Agent)".
+
+**Step 2 — Tell the agent to connect:**
 ```
 open_browser(browser="edge", cdp_url="http://localhost:9222")
 ```
@@ -415,12 +416,12 @@ open_browser(browser="edge", cdp_url="http://localhost:9222")
 
 ### Tips for CDP mode
 
-- **Your logins are preserved** — cookies live in the browser profile, not the debug session. Relaunching with the flag does not log you out.
-- **Close the browser fully first** — if Chrome or Edge is already running, the new command won't open a second instance. Close it, then run the command.
-- **Close it when done** — once you're finished with the agent, close the browser and reopen it normally (without the flag) to stop the debug port.
+- **Quit, don't just close** — on Mac, Cmd+Q quits; clicking the red dot just closes the window. The browser must be fully quit before relaunching with the flag.
+- **Your logins are not lost** — cookies and sessions are stored in the profile on disk. Relaunching with the flag reloads the same profile.
+- **Close it when done** — once finished, quit the browser and reopen it normally (without the flag) to stop the debug port.
 - **Port 9222 is the default** — any unused port works. If you change it, update the `cdp_url` to match (e.g. `http://localhost:9333`).
 - **Only one browser can use a port at a time** — don't run two browsers on the same port.
-- **You can watch the agent work** — the new tab opens in your own browser window and you can see every action in real time.
+- **You can watch the agent work** — the new tab opens in your own browser window so you can see every action in real time.
 
 ---
 
@@ -558,11 +559,21 @@ python -m playwright install firefox   # only if you use Firefox
 
 ---
 
-**"Could not connect to Firefox at http://localhost:9222"**
+**Firefox opens a new window instead of using my existing session**
 
-- Firefox **requires `--no-remote`** in the launch command. Without it, the command hands off to an existing Firefox process that doesn't have the debug port open.
-- Make sure the Playwright Firefox browser is installed: `playwright install firefox`
-- Verify Firefox is listening: open `http://localhost:9222` in another browser — you should get a response.
+Firefox does not support CDP connections in Playwright, so the `cdp_url` approach used for Chrome and Edge does not work with Firefox. Use profile mode instead:
+
+```
+open_browser(browser="firefox", profile_path="auto")
+```
+
+This launches Firefox with your existing profile (all logins and cookies intact). Firefox must be fully closed first (Cmd+Q on Mac).
+
+**"Could not launch Firefox with profile" error**
+
+- Firefox must be **fully quit** before calling `open_browser` with a profile — the profile is file-locked while Firefox is running.
+- Make sure `playwright install firefox` has been run once.
+- If `profile_path="auto"` picks the wrong profile, find your profiles at `~/Library/Application Support/Firefox/Profiles/` (Mac) or `%APPDATA%\Mozilla\Firefox\Profiles\` (Windows) and pass the full path explicitly.
 
 ---
 
