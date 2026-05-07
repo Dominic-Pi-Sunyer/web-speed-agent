@@ -196,14 +196,42 @@ Then restart your terminal or Command Prompt for the variable to take effect.
 
 ### Gemini CLI
 
-Open `~/.gemini/settings.json` and add:
+**macOS:**
 
-**macOS / Linux:**
+The settings file is at `~/.gemini/settings.json`. The `~/` means your home directory (`/Users/YourUsername/`).
+
+**Option 1 — Using Terminal (recommended):**
+
+Open Terminal and run:
+
+```bash
+nano ~/.gemini/settings.json
+```
+
+This opens the file in the nano text editor. If the file doesn't exist, nano will create it. Paste the configuration below, then:
+- Press `Ctrl+O` (Write Out)
+- Press Enter to confirm
+- Press `Ctrl+X` to exit
+
+**Option 2 — Using Finder:**
+
+1. Open Finder
+2. Press `Cmd+Shift+G` (Go to Folder)
+3. Type: `~/.gemini`
+4. Click Go
+5. Double-click `settings.json` (or right-click → Open With → TextEdit)
+6. Paste the configuration below
+7. Save with `Cmd+S`
+
+**Configuration to paste:**
+
+If the file is empty or new, use this entire block:
+
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
-      "command": "python3",
+      "command": "/Users/yourname/web-speed-agent-env/bin/python",
       "args": ["/Users/yourname/tools/agent_mcp_server.py"],
       "env": {
         "WEBSPEED_API_KEY": "wsp_your_key_here"
@@ -213,7 +241,32 @@ Open `~/.gemini/settings.json` and add:
 }
 ```
 
+If the file already has content with `"mcpServers"`, only add the `"web-speed-agent"` block inside it.
+
+**Replace these with your values:**
+- `yourname` → your macOS username (find it with `whoami` in Terminal)
+- `wsp_your_key_here` → your API key from getwebspeed.io
+
+Save and restart Gemini CLI.
+
+---
+
+**Linux:**
+
+Use your preferred editor:
+
+```bash
+nano ~/.gemini/settings.json
+```
+
+Add the same JSON as above (with your username and API key).
+
+---
+
 **Windows — use the full Python path:**
+
+Open `%APPDATA%\.gemini\settings.json` (press `Win+R`, paste the path). Add:
+
 ```json
 {
   "mcpServers": {
@@ -228,7 +281,7 @@ Open `~/.gemini/settings.json` and add:
 }
 ```
 
-Restart Gemini CLI after saving.
+Save and restart Gemini CLI.
 
 ---
 
