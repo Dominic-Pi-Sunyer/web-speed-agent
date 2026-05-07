@@ -37,6 +37,21 @@ _SENSITIVE_META_RE = re.compile(
     re.IGNORECASE,
 )
 
+# data-* attribute names that may carry tokens (Angular, Django, Rails, etc.)
+# Matched against the full attribute name, e.g. data-csrf-token → "csrf-token".
+_SENSITIVE_DATA_ATTR_RE = re.compile(
+    r"csrf|token|nonce|session|auth|secret|captcha",
+    re.IGNORECASE,
+)
+
+# URL query params that commonly carry session tokens.
+# When found in href/action/src, the value of those params is blanked.
+_SENSITIVE_PARAM_RE = re.compile(
+    r"((?:^|&)(?:_token|csrf|csrftoken|authenticity_token|nonce|sessionid"
+    r"|session_id|auth_token|access_token|s|sid)=)[^&]*",
+    re.IGNORECASE,
+)
+
 
 class _Scrubber(HTMLParser):
     """Single-pass HTML scrubber. Strips sensitive values without a full DOM parse."""
@@ -53,6 +68,15 @@ class _Scrubber(HTMLParser):
     def _attrs_dict(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
         return {k.lower(): (v or "") for k, v in attrs}
 
+    @staticmethod
+    def _scrub_url(url: str) -> str:
+        """Blank sensitive query-param values in a URL string."""
+        if "?" not in url:
+            return url
+        base, qs = url.split("?", 1)
+        cleaned = _SENSITIVE_PARAM_RE.sub(lambda m: m.group(1), qs)
+        return f"{base}?{cleaned}"
+
     def _rebuild_tag(
         self,
         tag: str,
@@ -63,9 +87,17 @@ class _Scrubber(HTMLParser):
         for k, v in attrs:
             if v is None:
                 parts.append(f" {k}")
-            else:
-                escaped = v.replace('"', "&quot;")
-                parts.append(f' {k}="{escaped}"')
+                continue
+            # Blank sensitive data-* attribute values
+            if k.startswith("data-"):
+                attr_suffix = k[5:]  # strip "data-"
+                if _SENSITIVE_DATA_ATTR_RE.search(attr_suffix):
+                    v = ""
+            # Scrub token params from URL-bearing attributes
+            elif k in ("href", "action", "src", "formaction") and v:
+                v = self._scrub_url(v)
+            escaped = v.replace('"', "&quot;")
+            parts.append(f' {k}="{escaped}"')
         parts.append(" />" if self_closing else ">")
         return "".join(parts)
 
