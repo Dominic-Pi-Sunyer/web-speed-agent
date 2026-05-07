@@ -266,7 +266,7 @@ Once connected, the AI can use these tools automatically — you don't need to c
 |------|-------------|
 | `store_credential` | Save a site's login to your system keychain |
 | `setup_browser` | One-time setup: installs a wrapper so Chrome/Edge always starts with the debug port, enabling the agent to open tabs in your real browser |
-| `open_browser` | Open a browser — choose Chrome, Firefox, or Edge; or attach to one already running |
+| `open_browser` | Open a browser. Chrome auto-connects to your running chrome-agent window (CDP). Firefox imports cookies from your profile. |
 | `navigate` | Go to a URL |
 | `login` | Fill and submit a login form |
 | `read_page` | Extract structured data from the current page (costs 1 credit) |
@@ -296,11 +296,13 @@ Browsers don't expose any control interface by default — that would be a serio
 
 The good news: once Chrome is set up to always start with the debug port, the agent *does* open a real new tab in your actual Chrome window, with all your existing sessions — exactly like a normal tab.
 
-**Quickest setup (ask the agent):**
+**One-time setup (ask the agent):**
 ```
 setup_browser(browser="chrome")
 ```
-This installs a shell script and alias that kills/relaunches Chrome with the debug port. Run it once, then always open Chrome using the new `chrome-agent` shortcut. The agent can then always connect to your real browser without any extra steps.
+This creates a dedicated Chrome profile at `~/.webspeed/chrome-debug/` (required — Chrome refuses the debug port on its default profile), copies your existing cookies into it, and installs a `chrome-agent` shell script.
+
+After setup, always open Chrome by typing `chrome-agent` in Terminal. Then `open_browser(browser="chrome")` — with no extra arguments — automatically detects the debug port and opens a new tab in your real Chrome window.
 
 ### Is the remote debugging port safe?
 

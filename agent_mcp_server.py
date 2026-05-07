@@ -459,37 +459,30 @@ async def open_browser(
 
     **browser** — which browser to use: "chrome" (default), "firefox", or "edge".
 
-    ── Standard mode ────────────────────────────────────────────────────────────
-    Launches a fresh Playwright browser. Use session_name to save cookies and
-    reuse them on the next run.
+    ── Chrome default behaviour ──────────────────────────────────────────────────
+    For Chrome, CDP is tried automatically first. If the user has run
+    'chrome-agent' (which opens Chrome with --remote-debugging-port=9222),
+    the agent connects to that existing window and opens a new tab — the user's
+    real Chrome with all their logins, cookies, and extensions.
 
-    ── Profile mode (recommended) ───────────────────────────────────────────────
-    Opens the browser using your real installed browser binary and existing
-    profile — all your logins and cookies are already there. The browser must
-    be fully closed first (profile directory is locked while it's running).
+    If Chrome is not running with the debug port, a helpful message is returned
+    explaining how to start it.
 
-      open_browser(browser="chrome",   profile_path="auto")
-      open_browser(browser="firefox",  profile_path="auto")
-      open_browser(browser="edge",     profile_path="auto")
+    ── Firefox ───────────────────────────────────────────────────────────────────
+    Imports cookies from the user's Firefox profile (read-only) into a fresh
+    Playwright session. Pass profile_path="auto" to detect the profile.
 
-    "auto" finds the profile directory automatically. Pass an explicit path to
-    override. Note: Playwright ships a Firefox Nightly build, so Firefox will
-    always show "Firefox Nightly" in the title bar — this is expected.
-
-    ── CDP mode — Chrome / Edge only ────────────────────────────────────────────
-    Alternative for Chrome/Edge: attach to a browser you launched manually with
-    --remote-debugging-port=9222. More fragile than profile mode (ghost processes
-    can prevent the port from opening). Use profile mode when possible.
+    ── Manual overrides ──────────────────────────────────────────────────────────
+    cdp_url: connect to a specific debug URL (e.g. non-default port).
+    profile_path: use an explicit profile directory (Chrome/Firefox/Edge).
+    session_name: persist cookies across fresh Playwright sessions.
 
     Args:
         browser: "chrome" (default), "firefox", or "edge".
-        session_name: Cookie-persist name for standard mode (ignored in other modes).
+        session_name: Cookie-persist name for standard/fresh mode.
         headless: Hide the window in standard/profile mode (default False).
-        cdp_url: Chrome/Edge only — attach to an already-running browser.
-                 Typically "http://localhost:9222".
-        profile_path: Launch with an existing browser profile. Pass "auto" to
-                      detect the profile automatically, or a full directory path.
-                      Supported for chrome, firefox, and edge.
+        cdp_url: Override the CDP URL (default for Chrome: http://localhost:9222).
+        profile_path: Launch with an existing browser profile ("auto" or full path).
     """
     global _pw, _browser, _context, _page, _session_name, _cdp_mode, _persistent_ctx, _browser_name
 
@@ -507,6 +500,24 @@ async def open_browser(
         _browser_name = bname
         _pw = await async_playwright().start()
         engine = _get_browser_type(bname, _pw)
+
+        # ── Chrome auto-CDP ───────────────────────────────────────────────────
+        # For Chrome, CDP is the preferred mode. If no explicit mode is set,
+        # check whether chrome-agent is already running (port 9222 open) and
+        # connect automatically. This means open_browser(browser="chrome") just
+        # works when the user has chrome-agent running, with no extra arguments.
+        if bname == "chrome" and cdp_url is None and profile_path is None:
+            if _is_port_open("localhost", 9222):
+                cdp_url = "http://localhost:9222"
+            else:
+                return _err(
+                    "Chrome is not running with the remote debugging port.\n\n"
+                    "Start it with:\n"
+                    "  chrome-agent\n\n"
+                    "If you haven't run setup_browser() yet, do that first — it\n"
+                    "creates the chrome-agent shortcut with your existing cookies loaded.\n\n"
+                    "Once Chrome is open via chrome-agent, call open_browser() again."
+                )
 
         if cdp_url:
             # ── CDP mode: attach to a running Chrome or Edge ──────────────────
