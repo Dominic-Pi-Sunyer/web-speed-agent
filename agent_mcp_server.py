@@ -155,10 +155,17 @@ async def open_browser(
 
 
 @mcp.tool()
-async def navigate(url: str) -> str:
+async def navigate(url: str, expect_url_contains: str | None = None) -> str:
     """Navigate to a URL and return the page title and final URL.
 
     Always call this before interacting with a new page.
+
+    Args:
+        url: The URL to navigate to.
+        expect_url_contains: Optional substring the final URL should contain.
+                             If the page redirected elsewhere (common on SPAs),
+                             a 'spa_redirect' warning is included in the result
+                             so the agent knows to adjust its approach.
     """
     page = _require_page()
     try:
@@ -167,7 +174,14 @@ async def navigate(url: str) -> str:
     except Exception:
         pass  # networkidle can time out on busy pages — that's fine
     summary = await _page_summary(page)
-    return _ok({"message": f"Navigated to {summary['url']}", **summary})
+    result: dict = {"message": f"Navigated to {summary['url']}", **summary}
+    if expect_url_contains and expect_url_contains not in summary["url"]:
+        result["spa_redirect"] = (
+            f"Expected URL to contain '{expect_url_contains}' but landed on "
+            f"'{summary['url']}'. The SPA may have redirected — try navigating "
+            "from the homepage or interacting with the UI instead of deep-linking."
+        )
+    return _ok(result)
 
 
 @mcp.tool()
@@ -258,22 +272,47 @@ async def read_page(page_type: str = "auto") -> str:
 
 
 @mcp.tool()
-async def click(selector: str, wait_for_navigation: bool = True) -> str:
+async def click(
+    selector: str,
+    wait_for_navigation: bool = True,
+    wait_for: str | None = None,
+    wait_ms: int = 0,
+) -> str:
     """Click an element by CSS selector.
 
     Args:
         selector: CSS selector for the element to click.
-        wait_for_navigation: Wait for the page to load after clicking (default True).
+        wait_for_navigation: Wait for a page load after clicking (default True).
+                             Set to False for clicks that trigger in-page UI changes
+                             like modals, dropdowns, or expanding sections.
+        wait_for: CSS selector to wait for AFTER clicking — use this when the click
+                  opens a modal or triggers async UI rendering. The tool waits up to
+                  5 s for the element to appear before returning.
+        wait_ms: Extra milliseconds to wait after the click before reading the page.
+                 Useful for SPAs where JS hydration takes a moment (e.g. 500–2000).
     """
     page = _require_page()
     try:
         await page.click(selector, timeout=10_000)
-        if wait_for_navigation:
+
+        if wait_for:
+            # Waiting for a specific post-click element takes priority over
+            # generic navigation waits — the element appearing IS the signal.
+            try:
+                await page.wait_for_selector(wait_for, timeout=5_000)
+            except Exception:
+                pass  # Report what we can; caller will see what's on the page
+        elif wait_for_navigation:
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=10_000)
                 await page.wait_for_load_state("networkidle", timeout=6_000)
             except Exception:
                 pass
+
+        if wait_ms > 0:
+            import asyncio as _asyncio
+            await _asyncio.sleep(min(wait_ms, 10_000) / 1000)
+
         summary = await _page_summary(page)
         return _ok({"message": f"Clicked '{selector}'", **summary})
     except Exception as exc:
@@ -341,18 +380,84 @@ async def get_page_info() -> str:
 
 
 @mcp.tool()
-async def wait_for_element(selector: str, timeout_ms: int = 10000) -> str:
-    """Wait for an element to appear on the page.
+async def wait_for_element(
+    selector: str,
+    timeout_ms: int = 10000,
+    state: str = "visible",
+) -> str:
+    """Wait for an element to reach a given state on the page.
 
-    Useful after an action that triggers async loading (e.g. clicking a button
-    that loads a new section). Returns ok once the element is visible.
+    Useful after an action that triggers async loading, modal opening, or
+    element removal. Returns ok once the condition is met.
+
+    Args:
+        selector: CSS selector for the element to watch.
+        timeout_ms: Maximum time to wait in milliseconds (default 10 000).
+        state: One of:
+               'visible'  — element exists and is visible (default)
+               'hidden'   — element exists but is hidden, or does not exist
+               'attached' — element is in the DOM (may be hidden)
+               'detached' — element has been removed from the DOM
+    """
+    page = _require_page()
+    valid_states = ("visible", "hidden", "attached", "detached")
+    if state not in valid_states:
+        return _err(f"Invalid state '{state}'. Choose from: {', '.join(valid_states)}")
+    try:
+        await page.wait_for_selector(selector, state=state, timeout=timeout_ms)
+        return _ok({"message": f"Element '{selector}' is now {state}"})
+    except Exception as exc:
+        return _err(f"Element '{selector}' did not reach state '{state}' within {timeout_ms}ms: {exc}")
+
+
+@mcp.tool()
+async def wait_for_url(url_contains: str, timeout_ms: int = 10000) -> str:
+    """Wait for the page URL to contain a given substring.
+
+    Use this after clicking a SPA navigation link where the URL changes
+    client-side without a full page reload. Returns once the URL matches
+    or the timeout expires.
+
+    Args:
+        url_contains: Substring the URL must contain (e.g. '/dashboard', '?tab=posts').
+        timeout_ms: Maximum time to wait in milliseconds (default 10 000).
     """
     page = _require_page()
     try:
-        await page.wait_for_selector(selector, timeout=timeout_ms)
-        return _ok({"message": f"Element '{selector}' appeared on page"})
+        await page.wait_for_url(f"**{url_contains}**", timeout=timeout_ms)
+        summary = await _page_summary(page)
+        return _ok({"message": f"URL now contains '{url_contains}'", **summary})
     except Exception as exc:
-        return _err(f"Element '{selector}' did not appear within {timeout_ms}ms: {exc}")
+        summary = await _page_summary(page)
+        return _err(
+            f"URL did not contain '{url_contains}' within {timeout_ms}ms. "
+            f"Current URL: {summary['url']}"
+        )
+
+
+@mcp.tool()
+async def evaluate(js: str) -> str:
+    """Run JavaScript in the page context and return the result.
+
+    Use this to handle situations standard selectors can't reach:
+    - Shadow DOM:  document.querySelector('my-el').shadowRoot.querySelector('input')
+    - Iframes:     document.querySelector('iframe').contentDocument.querySelector('p')
+    - Hidden data: window.__INITIAL_DATA__ or JSON.parse(document.getElementById('__NEXT_DATA__').textContent)
+    - Visibility checks: document.querySelector('.modal')?.getBoundingClientRect()
+    - Triggering events: document.querySelector('input').dispatchEvent(new Event('focus'))
+
+    Args:
+        js: JavaScript expression to evaluate. The return value is JSON-serialised
+            and included in the response. Keep expressions simple — complex logic
+            is better split across multiple calls.
+    """
+    page = _require_page()
+    try:
+        result = await page.evaluate(js)
+        summary = await _page_summary(page)
+        return _ok({"result": result, **summary})
+    except Exception as exc:
+        return _err(f"JavaScript evaluation failed: {exc}")
 
 
 @mcp.tool()
