@@ -17,7 +17,7 @@ playwright install chromium
 > 
 > Check out the **[MCP Server Installation Guide](docs/mcp-install.md)** — it's the easiest way to let AI agents log in and extract data through natural language.
 
-> We also recommend setting up a master instructional file for your LLM of choice (gemini.md, "Instructions for Claude", etc.). A sample doc can be found **[here](docs/instructions)**
+> We also recommend setting up a master instructional file for your LLM of choice (gemini.md, "Instructions for Claude", etc.). A sample doc can be found **[here](docs/instructions.md)**
 ---
 
 ## How it works
