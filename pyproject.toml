@@ -38,6 +38,9 @@ dev = [
     "pytest-httpx>=0.30",
 ]
 
+[project.scripts]
+webspeed-configure = "web_speed_agent.configure:main"
+
 [project.urls]
 Homepage = "https://getwebspeed.io"
 Repository = "https://github.com/Dominic-Pi-Sunyer/web-speed-agent"
