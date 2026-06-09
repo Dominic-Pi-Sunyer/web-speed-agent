@@ -50,7 +50,66 @@ from web_speed_agent.credentials import store_pair, get_pair, delete
 API_KEY     = os.getenv("WEBSPEED_API_KEY", "")
 SERVER_URL  = os.getenv("WEBSPEED_SERVER_URL", "https://api.getwebspeed.io")
 SESSIONS    = Path("~/.webspeed/sessions").expanduser()
-HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"
+HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"  # legacy default
+
+# ── remote config (control-panel settings) ────────────────────────────────────
+# The control panel on api.getwebspeed.io lets a user set agent defaults
+# (headless, browser) for their key. We fetch them once per process, lazily, and
+# FAIL OPEN: a missing key, a timeout, or any error just falls back to env vars /
+# built-in defaults, so the agent never blocks on the network at startup.
+# Precedence everywhere: explicit tool arg > env var > server config > default.
+# Credentials never travel this path — only behavior flags.
+_remote_cfg_cache: dict[str, Any] | None = None
+
+
+async def _remote_cfg() -> dict[str, Any]:
+    """Agent settings from the server, fetched once and cached. Never raises."""
+    global _remote_cfg_cache
+    if _remote_cfg_cache is not None:
+        return _remote_cfg_cache
+    cfg: dict[str, Any] = {}
+    if API_KEY:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{SERVER_URL}/v1/agent/config",
+                    headers={"x-web-speed-key": API_KEY},
+                )
+            if resp.status_code == 200 and isinstance(resp.json(), dict):
+                cfg = resp.json()
+        except Exception:
+            pass  # fail open
+    _remote_cfg_cache = cfg
+    return cfg
+
+
+def _env_headless() -> bool | None:
+    """WEBSPEED_HEADLESS as a bool, or None if unset (so server config can decide)."""
+    raw = os.getenv("WEBSPEED_HEADLESS")
+    if raw is None:
+        return None
+    return raw.strip().lower() not in ("", "false", "0", "no", "off")
+
+
+async def _resolve_headless(explicit: bool | None) -> bool:
+    if explicit is not None:
+        return explicit
+    env = _env_headless()
+    if env is not None:
+        return env
+    val = (await _remote_cfg()).get("headless")
+    return val if isinstance(val, bool) else False
+
+
+async def _resolve_browser(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    env = os.getenv("WEBSPEED_BROWSER")
+    if env and env.strip():
+        return env.strip()
+    val = (await _remote_cfg()).get("browser")
+    return val.strip() if isinstance(val, str) and val.strip() else "chrome"
 
 # ── stealth browser config ────────────────────────────────────────────────────
 
@@ -540,7 +599,7 @@ sleep 1.5
 
 @mcp.tool()
 async def open_browser(
-    browser: str = "chrome",
+    browser: str | None = None,
     session_name: str | None = None,
     headless: bool | None = None,
     cdp_url: str | None = None,
@@ -587,6 +646,9 @@ async def open_browser(
         return _err("Playwright not installed. Run: pip install playwright && playwright install chromium")
 
     try:
+        # Resolve browser via precedence: explicit arg > WEBSPEED_BROWSER env >
+        # control-panel default > "chrome". (headless is resolved per-mode below.)
+        browser = await _resolve_browser(browser)
         bname = browser.lower()
         _browser_name = bname
         _pw = await async_playwright().start()
@@ -666,7 +728,7 @@ async def open_browser(
             })
 
         elif profile_path:
-            run_headless = headless if headless is not None else HEADLESS
+            run_headless = await _resolve_headless(headless)
 
             if bname == "firefox":
                 # ── Firefox cookie-import mode ────────────────────────────────
@@ -833,7 +895,7 @@ async def open_browser(
 
             _cdp_mode = False
             _persistent_ctx = False
-            run_headless = headless if headless is not None else HEADLESS
+            run_headless = await _resolve_headless(headless)
 
             if bname == "chromium":
                 _browser = await engine.launch(
