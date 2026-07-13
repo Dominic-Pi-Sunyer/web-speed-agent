@@ -1048,7 +1048,7 @@ async def _docs_visible_text(page) -> str:
 #     it. Pull it full-screen and make it the only pointer-events target so a click
 #     lands squarely on it and moves browser focus into the editor.
 # After that, raw keyboard events (page.keyboard.type) drive the canvas editor.
-_DOCS_PREP_JS = r"""(() => {
+_DOCS_PREP_JS = r"""() => {
   let removed = 0;
   ['.kixWizBarkickWrapper', '[class*="WizBar"]', '.docs-gm-promo', '.kix-wizbar'].forEach(sel => {
     document.querySelectorAll(sel).forEach(el => { el.remove(); removed++; });
@@ -1065,9 +1065,9 @@ _DOCS_PREP_JS = r"""(() => {
     document.head.appendChild(s);
   }
   return { ok: true, removed };
-})()"""
+}"""
 
-_DOCS_CLEANUP_JS = r"""(() => {
+_DOCS_CLEANUP_JS = r"""() => {
   const iframe = document.querySelector('iframe.docs-texteventtarget-iframe');
   if (iframe && iframe.hasAttribute('data-ws-prev-style')) {
     iframe.setAttribute('style', iframe.getAttribute('data-ws-prev-style'));
@@ -1075,7 +1075,7 @@ _DOCS_CLEANUP_JS = r"""(() => {
   }
   const s = document.getElementById('ws-pe-override');
   if (s) s.remove();
-})()"""
+}"""
 
 
 async def _prepare_docs_input(page) -> bool:
