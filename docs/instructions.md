@@ -33,16 +33,16 @@ Choose the right tool for the state of the task:
 ## 3. High-Stakes Automation Patterns
 
 ### A. The "Golden Rule" of Hydration
-Modern web apps (React, Vue, etc.) look loaded before they are interactive. 
-- **Action**: Always wait **2000ms–4000ms** after a navigation or major click before your next action.
-- **Verification**: Never assume an action worked. Use `evaluate` to check the DOM for your changes.
+Modern web apps (React, Vue, etc.) look loaded before they are interactive.
+- **Action**: `navigate`, `click`, `login`, and `submit_form` now wait for real readiness automatically (the editor/content surface, not `networkidle`, which never settles on Google apps). Only add a manual wait — via `wait_for_element` — if a follow-up action reports its target is missing.
+- **Verification**: Never assume an action worked. Use `evaluate` or `read_page` to confirm your change landed.
 
-### B. Google Workspace Mastery (Docs, Slides, Sheets)
-Google Apps render content on a `<canvas>`, making text invisible to standard tools.
-1.  **Targeting**: The input layer is typically a hidden `iframe.docs-texteventtarget-iframe`.
-2.  **State Sync**: Direct `.value` changes are ignored by React/Google state. 
-3.  **Strategy**: Focus the `iframe` and use `document.execCommand('insertText', false, text)` on its `contentDocument`.
-4.  **Blocking Elements**: Always check for and close sidebars (e.g., "Gemini", "Help") before interacting with the main editor.
+### B. Google Workspace Mastery (Docs, Slides)
+Google Apps render content on a `<canvas>`, so `fill_field`/`click` can't place text.
+1.  **Use `workspace_write`**: for Docs it removes the Gemini onboarding overlay, pulls the hidden input iframe full-screen, clicks to focus it, then types with real keystrokes and verifies — the sequence proven to beat Docs' canvas barriers. Prefer it over hand-rolled `execCommand`.
+2.  **Docs**: call `workspace_write(text)` directly — it types at the cursor. `click` into the doc body first only if you need a specific location.
+3.  **Slides**: call `workspace_write(text, target="slides", placeholder=N)` — it removes the onboarding modal, double-clicks placeholder N (0 = title, 1 = subtitle/body …) to enter edit mode, and types. Use `workspace_new_slide()` to add a slide, then fill its placeholders.
+4.  **Reading back**: use `read_page` (Web Speed extraction) to get the current document text.
 
 ### C. Amazon & E-Commerce
 1.  **Product Discovery**: While `interpret_page` is excellent for details, use `evaluate` to scrape `.s-result-item[data-asin]` for 100% accurate product links and ASINs.

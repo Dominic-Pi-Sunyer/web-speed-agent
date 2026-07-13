@@ -965,6 +965,194 @@ async def open_browser(
         return _err(f"Could not open {browser}: {exc}. Try: playwright install chromium firefox")
 
 
+# ── Google Workspace helpers ─────────────────────────────────────────────────
+# Google Docs/Slides/Sheets render on a <canvas> and hold persistent autosave /
+# presence / telemetry connections, so the network NEVER goes idle. Waiting on
+# "networkidle" therefore burns its full timeout on every action. These helpers
+# detect Workspace editors and wait for the editor surface instead.
+_WORKSPACE_READY = {
+    "docs":   ".kix-appview-editor",
+    "slides": ".punch-editor-content, .sketchy-container, .editor-container",
+    "sheets": "#waffle-grid-container, .grid-container",
+}
+
+
+def _workspace_kind(url: str) -> str | None:
+    """Return 'docs' | 'slides' | 'sheets' if the URL is a Google Workspace editor."""
+    if not url:
+        return None
+    if "docs.google.com/document" in url:
+        return "docs"
+    if "docs.google.com/presentation" in url:
+        return "slides"
+    if "docs.google.com/spreadsheets" in url:
+        return "sheets"
+    return None
+
+
+async def _settle(page) -> None:
+    """Wait for the page to be interactive WITHOUT relying on networkidle.
+
+    On Google Workspace editors, networkidle never fires (persistent
+    connections), so we wait for the editor surface to appear instead — turning a
+    guaranteed multi-second timeout into a fast, real readiness signal. Elsewhere
+    we still allow a short, capped networkidle.
+    """
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+    except Exception:
+        pass
+    if _workspace_kind(page.url):
+        try:
+            await page.wait_for_selector(_WORKSPACE_READY[_workspace_kind(page.url)], timeout=15_000)
+        except Exception:
+            pass
+        return  # never wait for networkidle on Workspace — it won't come
+    try:
+        await page.wait_for_load_state("networkidle", timeout=6_000)
+    except Exception:
+        pass
+
+
+async def _dismiss_workspace_sidebars(page) -> None:
+    """Best-effort close of side panels (Gemini, Help, Explore) that overlay the
+    editor and swallow clicks/keystrokes. Safe: only clicks visible close buttons."""
+    for sel in (
+        "div[role='button'][aria-label^='Close'][aria-label*='ide']",   # 'Close side panel'
+        "button[aria-label^='Close'][aria-label*='Gemini']",
+        "div[aria-label='Close'][role='button']",
+    ):
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() and await btn.is_visible():
+                await btn.click(timeout=1_500)
+        except Exception:
+            pass
+
+
+async def _docs_visible_text(page) -> str:
+    """Best-effort read-back of Google Docs text for verification. Canvas Docs keep
+    an accessibility mirror in .kix-* nodes; returns '' if unavailable."""
+    try:
+        return await page.eval_on_selector_all(
+            ".kix-paragraphrenderer, .kix-lineview",
+            "els => els.map(e => e.innerText).join('\\n')",
+        )
+    except Exception:
+        return ""
+
+
+# The proven Google Docs focus sequence, discovered empirically:
+#  1. Blank docs pop a Gemini onboarding overlay that swallows keystrokes — remove it.
+#  2. The real input is a hidden iframe positioned offscreen, so Playwright clicks miss
+#     it. Pull it full-screen and make it the only pointer-events target so a click
+#     lands squarely on it and moves browser focus into the editor.
+# After that, raw keyboard events (page.keyboard.type) drive the canvas editor.
+_DOCS_PREP_JS = r"""(() => {
+  let removed = 0;
+  ['.kixWizBarkickWrapper', '[class*="WizBar"]', '.docs-gm-promo', '.kix-wizbar'].forEach(sel => {
+    document.querySelectorAll(sel).forEach(el => { el.remove(); removed++; });
+  });
+  const iframe = document.querySelector('iframe.docs-texteventtarget-iframe');
+  if (!iframe) return { ok: false, removed };
+  if (!iframe.hasAttribute('data-ws-prev-style'))
+    iframe.setAttribute('data-ws-prev-style', iframe.getAttribute('style') || '');
+  iframe.style.cssText = 'position:fixed;z-index:2147483647;top:0;left:0;width:100vw;height:100vh;opacity:0;';
+  if (!document.getElementById('ws-pe-override')) {
+    const s = document.createElement('style');
+    s.id = 'ws-pe-override';
+    s.textContent = 'body *{pointer-events:none !important;} iframe.docs-texteventtarget-iframe{pointer-events:auto !important;}';
+    document.head.appendChild(s);
+  }
+  return { ok: true, removed };
+})()"""
+
+_DOCS_CLEANUP_JS = r"""(() => {
+  const iframe = document.querySelector('iframe.docs-texteventtarget-iframe');
+  if (iframe && iframe.hasAttribute('data-ws-prev-style')) {
+    iframe.setAttribute('style', iframe.getAttribute('data-ws-prev-style'));
+    iframe.removeAttribute('data-ws-prev-style');
+  }
+  const s = document.getElementById('ws-pe-override');
+  if (s) s.remove();
+})()"""
+
+
+async def _prepare_docs_input(page) -> bool:
+    """Remove the Gemini overlay, pull the hidden input iframe full-screen, and click
+    it to move browser focus into the Docs editor. Returns True if the iframe was
+    found and focused; False (with a best-effort editor-surface click) otherwise."""
+    try:
+        prepped = await page.evaluate(_DOCS_PREP_JS)
+    except Exception:
+        prepped = None
+    if not (isinstance(prepped, dict) and prepped.get("ok")):
+        try:
+            await page.click(_WORKSPACE_READY["docs"], timeout=5_000)
+        except Exception:
+            pass
+        return False
+    try:
+        await page.click("iframe.docs-texteventtarget-iframe", timeout=5_000)
+    except Exception:
+        pass
+    return True
+
+
+async def _restore_docs_input(page) -> None:
+    """Undo the full-screen-iframe / pointer-events overrides so the document is
+    usable again for screenshots and subsequent actions. Generic: also clears the
+    Slides pointer-events lock (same #ws-pe-override style id)."""
+    try:
+        await page.evaluate(_DOCS_CLEANUP_JS)
+    except Exception:
+        pass
+
+
+# The proven Google Slides sequence, discovered empirically:
+#  1. New decks pop a .goog-modalpopup onboarding dialog (+ scrim) — remove both.
+#  2. Placeholder IDs are generated per-slide, so find them by the 'editor-' prefix.
+#  3. SVG <g> placeholders have no .click(); compute the box centre and dispatch a
+#     synthetic double-click there to enter text-edit mode and focus the input.
+#  4. Invisible SVG/div overlays steal clicks — lock pointer-events to the input
+#     iframe so nothing intercepts focus while typing.
+# `idx` selects which placeholder (0 = first, usually the title).
+_SLIDES_PREP_JS = r"""(idx) => {
+  ['.goog-modalpopup', '.goog-modalpopup-bg'].forEach(sel =>
+    document.querySelectorAll(sel).forEach(el => el.remove()));
+  const all = Array.from(document.querySelectorAll('[id^="editor-"]'))
+    .filter(el => { const r = el.getBoundingClientRect(); return r.width > 4 && r.height > 4; });
+  if (!all.length) return { ok: false, count: 0 };
+  const i = Math.max(0, Math.min(idx | 0, all.length - 1));
+  const el = all[i];
+  const r = el.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const fire = (t) => el.dispatchEvent(new MouseEvent(t,
+    { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+  fire('mousedown'); fire('mouseup'); fire('click');
+  fire('mousedown'); fire('mouseup'); fire('click'); fire('dblclick');
+  if (!document.getElementById('ws-pe-override')) {
+    const s = document.createElement('style');
+    s.id = 'ws-pe-override';
+    s.textContent = '*{pointer-events:none !important;} iframe.docs-texteventtarget-iframe{pointer-events:auto !important;}';
+    document.head.appendChild(s);
+  }
+  return { ok: true, count: all.length, index: i };
+}"""
+
+
+async def _prepare_slides_input(page, placeholder: int = 0) -> bool:
+    """Remove the Slides onboarding modal, find the Nth text placeholder (IDs are
+    dynamic, so query [id^="editor-"]), synthesise a double-click at its centre to
+    enter edit mode, and lock pointer-events to the input iframe. Returns True if a
+    placeholder was found and activated."""
+    try:
+        res = await page.evaluate(_SLIDES_PREP_JS, placeholder)
+    except Exception:
+        res = None
+    return bool(isinstance(res, dict) and res.get("ok"))
+
+
 @mcp.tool()
 async def navigate(url: str, expect_url_contains: str | None = None) -> str:
     """Navigate to a URL and return the page title and final URL.
@@ -981,9 +1169,9 @@ async def navigate(url: str, expect_url_contains: str | None = None) -> str:
     page = _require_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
-        pass  # networkidle can time out on busy pages — that's fine
+        pass  # goto can throw on slow/streaming pages; _settle handles readiness
+    await _settle(page)
     summary = await _page_summary(page)
     result: dict = {"message": f"Navigated to {summary['url']}", **summary}
     if expect_url_contains and expect_url_contains not in summary["url"]:
@@ -1044,11 +1232,7 @@ async def login(
         await page.fill(u_sel, _user)
         await page.fill(p_sel, _pass)
         await page.click(s_sel)
-        await page.wait_for_load_state("domcontentloaded", timeout=15_000)
-        try:
-            await page.wait_for_load_state("networkidle", timeout=8_000)
-        except Exception:
-            pass
+        await _settle(page)
         summary = await _page_summary(page)
         return _ok({"message": f"Login submitted — now on: {summary['url']}", **summary})
     except Exception as exc:
@@ -1114,11 +1298,7 @@ async def click(
             except Exception:
                 pass  # Report what we can; caller will see what's on the page
         elif wait_for_navigation:
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
-                await page.wait_for_load_state("networkidle", timeout=6_000)
-            except Exception:
-                pass
+            await _settle(page)
 
         if wait_ms > 0:
             import asyncio as _asyncio
@@ -1188,6 +1368,115 @@ async def fill_field(
 
 
 @mcp.tool()
+async def workspace_write(text: str, target: str = "auto", verify: bool = True, placeholder: int = 0) -> str:
+    """Type text into a Google Workspace editor (Docs or Slides) reliably.
+
+    Google Docs/Slides render on <canvas>, so `fill_field`/`click` can't place
+    text and `execCommand` is deprecated/flaky. This tool dismisses blocking side
+    panels, focuses the editor, and types with real keystrokes (the events the
+    canvas editor actually listens for), then verifies.
+
+    Docs:   types at the current cursor (auto-removes the Gemini overlay and
+            focuses the hidden input iframe).
+    Slides: pass placeholder=N to pick the text box (0 = first, usually the
+            title). Removes the onboarding modal, double-clicks the placeholder to
+            enter edit mode, then types. Use workspace_new_slide() to add slides.
+
+    Newlines in `text` are sent as real Enter presses.
+
+    Args:
+        text:        Text to type.
+        target:      'auto' (detect from URL), or force 'docs' / 'slides'.
+        verify:      Read the text back to confirm it landed (Docs only, best-effort).
+        placeholder: Slides only — which text placeholder to edit (0-based, in
+                     document order; 0 is typically the title).
+    """
+    import asyncio as _asyncio
+    page = _require_page()
+    kind = target if target in ("docs", "slides") else _workspace_kind(page.url)
+    if kind not in ("docs", "slides"):
+        return _err(
+            "Not on a Google Docs or Slides editor. Navigate to the document first, "
+            "or pass target='docs'|'slides'."
+        )
+    try:
+        await _dismiss_workspace_sidebars(page)
+
+        # Focus the editor with the app-specific proven sequence. Docs: remove the
+        # Gemini overlay + full-screen the hidden input iframe. Slides: remove the
+        # onboarding modal + synthetic double-click the target placeholder.
+        docs_prepped = slides_prepped = False
+        if kind == "docs":
+            docs_prepped = await _prepare_docs_input(page)
+        elif kind == "slides":
+            slides_prepped = await _prepare_slides_input(page, placeholder)
+
+        # Real keystrokes — canvas editors ignore programmatic value changes but
+        # honour genuine key events. Split on newlines to send Enter presses.
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line:
+                await page.keyboard.type(line, delay=12)
+            if i < len(lines) - 1:
+                await page.keyboard.press("Enter")
+
+        # Restore the page (undo the iframe overlay / pointer-events lock) before
+        # anything else touches it, so screenshots and later clicks work normally.
+        if docs_prepped or slides_prepped:
+            await _restore_docs_input(page)
+
+        result: dict = {"message": f"Typed {len(text)} chars into Google {kind.title()}"}
+
+        if verify and kind == "docs":
+            await _asyncio.sleep(0.5)  # let the editor commit the edit
+            body = await _docs_visible_text(page)
+            probe = text.strip().split("\n")[0][:40]
+            if probe and body:
+                result["verified"] = probe in body
+                if not result["verified"]:
+                    result["warning"] = (
+                        "Couldn't confirm the text landed. The editor may not have had "
+                        "focus — click into the document body and retry."
+                    )
+            else:
+                result["verified"] = None  # couldn't read the canvas a11y mirror
+        return _ok(result)
+    except Exception as exc:
+        return _err(f"workspace_write failed: {exc}")
+
+
+@mcp.tool()
+async def workspace_new_slide() -> str:
+    """Add a new slide in Google Slides (equivalent to Ctrl+M).
+
+    Drops the pointer-events lock first so the toolbar is clickable, clicks the
+    'New slide' button, and settles. Then call
+    workspace_write(target='slides', placeholder=N) to fill the new slide.
+    """
+    page = _require_page()
+    if _workspace_kind(page.url) != "slides":
+        return _err("Not on a Google Slides editor.")
+    try:
+        await _restore_docs_input(page)  # clear any pointer-events lock first
+        clicked = False
+        try:
+            await page.click("[aria-label^='New slide']", timeout=5_000)
+            clicked = True
+        except Exception:
+            try:
+                await page.keyboard.press("Control+m")
+                clicked = True
+            except Exception:
+                pass
+        await _settle(page)
+        if not clicked:
+            return _err("Could not find the 'New slide' button (aria-label^='New slide').")
+        return _ok({"message": "Added a new slide"})
+    except Exception as exc:
+        return _err(f"workspace_new_slide failed: {exc}")
+
+
+@mcp.tool()
 async def submit_form(selector: str | None = None) -> str:
     """Submit a form by clicking a submit button or pressing Enter.
 
@@ -1201,11 +1490,7 @@ async def submit_form(selector: str | None = None) -> str:
             await page.click(selector, timeout=8_000)
         else:
             await page.keyboard.press("Enter")
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=15_000)
-            await page.wait_for_load_state("networkidle", timeout=8_000)
-        except Exception:
-            pass
+        await _settle(page)
         summary = await _page_summary(page)
         return _ok({"message": f"Form submitted — now on: {summary['url']}", **summary})
     except Exception as exc:
