@@ -102,11 +102,51 @@ def hosted_entry(key: str) -> dict:
     }
 
 
+def find_console_script() -> str | None:
+    """Absolute path to the installed `webspeed-agent` executable, if present.
+
+    Absolute, never the bare name: MCP hosts are GUI apps, and a GUI process on
+    Windows inherits a minimal PATH that usually excludes the Python Scripts
+    directory. A bare command works from a terminal and then fails silently when
+    the desktop app launches it — the worst kind of bug to support.
+
+    Checks the running interpreter's own script directory first so a venv
+    install resolves to that venv rather than whatever is on PATH.
+    """
+    exe = "webspeed-agent.exe" if os.name == "nt" else "webspeed-agent"
+    here = Path(sys.executable).parent          # venv/bin or venv\Scripts
+    cand = here / exe
+    if cand.exists():
+        return str(cand)
+    found = shutil.which("webspeed-agent")
+    return found or None
+
+
 def agent_entry(key: str, agent_path: Path, python: str) -> dict:
-    """Claude Desktop entry for the local browser agent (stdio)."""
+    """Claude Desktop entry for the local browser agent (stdio).
+
+    Prefers the installed console script — one absolute path, no separate
+    interpreter, and it survives the package moving on disk. Falls back to
+    interpreter + module path for checkout-only installs (`git clone` with no
+    `pip install`), which is how the agent ran before it was packaged properly.
+    """
+    # Launch via `python -m`, NOT the console script, even though the script
+    # exists. Two Windows failures come from pointing an MCP host at a
+    # package-owned .exe:
+    #
+    #   1. Upgrades break. Claude Desktop holds webspeed-agent.exe open, so pip
+    #      hits "WinError 32: file in use", aborts mid-upgrade, and leaves the
+    #      package renamed to ~eb_speed_agent — importable by nothing. The user
+    #      is left with a working shim pointing at a package that is gone.
+    #   2. The shim can drift from the install. A stale .exe on PATH resolves to
+    #      a Python whose site-packages no longer has the module.
+    #
+    # sys.executable is by definition the interpreter running this configurator,
+    # so it is guaranteed to be the one that can import the package — and pip
+    # never needs to replace python.exe, so upgrades stop fighting the MCP host.
     return {
-        "command": python,
-        "args": [str(agent_path)],
+        "command": sys.executable,
+        "args": ["-m", "web_speed_agent.mcp_server"],
         "env": {"WEBSPEED_API_KEY": key},
     }
 
@@ -225,15 +265,26 @@ def main(argv: list[str] | None = None) -> int:
 
     agent_path: Path | None = None
     if do_agent:
+        # A pip install has no checkout, so the server file is irrelevant — the
+        # console script is the entry point. Only fall back to hunting for the
+        # file when that script isn't installed (bare `git clone`, no pip).
+        # Importability is what matters now that the entry is `python -m …`;
+        # the console script is only a signal that the package is installed.
+        try:
+            import web_speed_agent.mcp_server  # noqa: F401
+            script: str | None = "installed"
+        except Exception:
+            script = find_console_script()
         agent_path = find_agent_server(args.agent_path)
-        if agent_path is None:
-            print("!  Couldn't find agent_mcp_server.py, so the local agent will be "
-                  "skipped.\n"
-                  "   Run this from your web-speed-agent checkout, or pass "
-                  "--agent-path /path/to/agent_mcp_server.py.")
+        if script is None and agent_path is None:
+            print("!  Local agent skipped — it isn't installed and no checkout was "
+                  "found.\n"
+                  "   Fix with:  pip install web-speed-agent\n"
+                  "   Or run this from a checkout / pass --agent-path "
+                  "/path/to/agent_mcp_server.py.")
             do_agent = False
         else:
-            entries[AGENT_NAME] = agent_entry(key, agent_path, args.python)
+            entries[AGENT_NAME] = agent_entry(key, agent_path or Path(), args.python)
 
     if not entries:
         print("x  Nothing to configure.")

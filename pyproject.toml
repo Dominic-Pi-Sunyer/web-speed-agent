@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "web-speed-agent"
-version = "0.2.0"
+version = "0.3.3"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,12 +26,20 @@ dependencies = [
     "httpx>=0.24.0",
     "pyyaml>=6.0",
     "keyring>=24.0",
+    # Core, not optional: mcp_server.py imports mcp.server.fastmcp at module
+    # level and the MCP server is the primary way people use this package.
+    # As an extra, `pip install web-speed-agent` produced an ImportError.
+    #
+    # Upper bound is REQUIRED, not caution: mcp 2.0 removed mcp.server.fastmcp,
+    # so an unpinned ">=1.0.0" resolves to 2.x and the agent dies on import.
+    # Lift only alongside a port to the 2.x server API.
+    "mcp>=1.0.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
-mcp = [
-    "mcp>=1.0.0",
-]
+# Retained (empty) so existing `pip install web-speed-agent[mcp]` commands and
+# docs keep working — mcp is a core dependency now.
+mcp = []
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
@@ -39,6 +47,7 @@ dev = [
 ]
 
 [project.scripts]
+webspeed-agent = "web_speed_agent.mcp_server:main"
 webspeed-configure = "web_speed_agent.configure:main"
 
 [project.urls]
@@ -48,3 +57,18 @@ Issues = "https://github.com/Dominic-Pi-Sunyer/web-speed-agent/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+
+[tool.hatch.build.targets.wheel]
+# Explicit, so a new module can never be silently left out of a release again.
+packages = ["web_speed_agent"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "web_speed_agent/",
+    "agent_mcp_server.py",
+    "README.md",
+    "LICENSE",
+    "docs/",
+    "examples/",
+]
