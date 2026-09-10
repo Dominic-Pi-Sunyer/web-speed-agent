@@ -23,7 +23,8 @@ Common options:
     --hosted-only      Configure only the hosted MCP (skip the local agent).
     --agent-only       Configure only the local browser agent.
     --print            Dry run: show what would be written, change nothing.
-    --claude-code      Also print the equivalent `claude mcp add` commands.
+    --claude-code      Also emit the equivalent `claude mcp add` commands.
+    --apply            With --claude-code, RUN them instead of printing.
     --agent-path PATH  Path to agent_mcp_server.py (auto-detected from a clone).
     --python PATH      Interpreter for the local agent (default: this one).
     --config-path PATH Override the Claude Desktop config location.
@@ -32,7 +33,7 @@ Common options:
 
 This file has no third-party imports on purpose, so it can also be downloaded
 on its own and run for a hosted-only setup:
-    curl -fsSL https://getwebspeed.io/configure.py | python3 - --key wsp_... --hosted-only
+    curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --key wsp_... --hosted-only
 """
 from __future__ import annotations
 
@@ -40,7 +41,9 @@ import argparse
 import json
 import os
 import platform
+import shlex
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -207,16 +210,62 @@ def atomic_write(path: Path, data: dict) -> None:
 
 # ── claude code helper ─────────────────────────────────────────────────────────
 
+def claude_code_commands(key: str, python: str,
+                         do_hosted: bool, do_agent: bool) -> list[list[str]]:
+    """The `claude mcp add` invocations, as argv lists so they can be run as well
+    as printed."""
+    cmds: list[list[str]] = []
+    if do_hosted:
+        cmds.append(["claude", "mcp", "add", HOSTED_NAME, "--transport", "sse",
+                     "--url", SSE_URL, "--header", f"X-Web-Speed-Key: {key}"])
+    if do_agent:
+        # `-m web_speed_agent.mcp_server`, matching agent_entry() — NOT a path to
+        # agent_mcp_server.py. Two bugs lived in the old form: a pip or uv install
+        # has no such file, so the command it printed could not run; and it was
+        # emitted only when a checkout happened to be found, so the very users this
+        # is aimed at got no agent command at all.
+        cmds.append(["claude", "mcp", "add", AGENT_NAME,
+                     "--env", f"WEBSPEED_API_KEY={key}",
+                     "--", python, "-m", "web_speed_agent.mcp_server"])
+    return cmds
+
+
 def print_claude_code(key: str, agent_path: Path | None, python: str,
                       do_hosted: bool, do_agent: bool) -> None:
     print("\n# Claude Code equivalents (run these instead, if you use Claude Code):")
-    if do_hosted:
-        print(f'claude mcp add {HOSTED_NAME} --transport sse \\\n'
-              f'  --url "{SSE_URL}" \\\n'
-              f'  --header "X-Web-Speed-Key: {key}"')
-    if do_agent and agent_path:
-        print(f'claude mcp add {AGENT_NAME} '
-              f'--env WEBSPEED_API_KEY={key} -- {python} {agent_path}')
+    for cmd in claude_code_commands(key, python, do_hosted, do_agent):
+        print(shlex.join(cmd))
+
+
+def apply_claude_code(key: str, python: str,
+                      do_hosted: bool, do_agent: bool) -> bool:
+    """Run the `claude mcp add` commands. Returns False if the CLI isn't present.
+
+    Falls back to printing rather than failing: someone piping install.sh may only
+    have Claude Desktop, and a missing `claude` binary is not worth exiting on.
+    """
+    if shutil.which("claude") is None:
+        return False
+    print("\nConfiguring Claude Code:")
+    for cmd in claude_code_commands(key, python, do_hosted, do_agent):
+        name = cmd[3]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            print(f"   x  {name}: {exc}")
+            continue
+        if r.returncode == 0:
+            print(f"   OK {name}")
+            continue
+        detail = (r.stderr or r.stdout or "").strip().splitlines()
+        first = detail[0] if detail else f"exit {r.returncode}"
+        # `claude mcp add` refuses a name that is already registered. On a re-run
+        # that is the expected outcome, not something to alarm anyone about.
+        if "already exists" in first.lower():
+            print(f"   -  {name} already configured (left alone)")
+        else:
+            print(f"   x  {name}: {first[:120]}")
+    return True
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -236,7 +285,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="Interpreter for the local agent (default: this one).")
     ap.add_argument("--config-path", help="Override the Claude Desktop config path.")
     ap.add_argument("--claude-code", action="store_true",
-                    help="Also print the equivalent `claude mcp add` commands.")
+                    help="Also emit the equivalent `claude mcp add` commands.")
+    ap.add_argument("--apply", action="store_true",
+                    help="With --claude-code, run those commands instead of "
+                         "printing them.")
     ap.add_argument("--print", dest="dry_run", action="store_true",
                     help="Dry run: print what would be written, change nothing.")
     ap.add_argument("--force", action="store_true",
@@ -332,15 +384,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {step}. Make sure Node.js is installed (npx bridges the "
                   f"hosted server).")
         step += 1
-    if do_agent and agent_path:
-        print(f"  {step}. Make sure Playwright is installed for the agent:  "
-              f'"{args.python}" -m playwright install chromium')
+    if do_agent:
+        # Deliberately NOT "run playwright install chromium". Chrome is driven over
+        # CDP by attaching to your own browser — open_browser never launches it —
+        # so the ~150MB browser download the old text demanded is not needed for
+        # the path almost everyone uses. Only the firefox/chromium/edge launch
+        # modes need it, and setup_browser says so at the point it matters.
+        print(f"  {step}. Ask Claude to \"set up my browser\" the first time you "
+              f"need a logged-in site.")
         step += 1
     print(f"  {step}. Start a new chat — the Web Speed tools will be available.")
 
-    if do_agent and agent_path:
+    if do_agent:
         print(f"\nLocal agent interpreter: {args.python}")
-        print(f"Local agent script:      {agent_path}")
+        print(f"Local agent entry:       -m web_speed_agent.mcp_server")
 
     if not cfg_path.parent.exists():
         print("\n!  Note: the Claude config folder didn't exist — if Claude "
@@ -348,7 +405,12 @@ def main(argv: list[str] | None = None) -> int:
               "picked up.")
 
     if args.claude_code:
-        print_claude_code(key, agent_path, args.python, do_hosted, do_agent)
+        # --apply runs them; without it, or when the CLI isn't installed, fall back
+        # to printing so the user still has something to copy.
+        if not (args.apply and apply_claude_code(key, args.python, do_hosted, do_agent)):
+            if args.apply:
+                print("\n!  `claude` CLI not found — printing the commands instead.")
+            print_claude_code(key, agent_path, args.python, do_hosted, do_agent)
 
     return 0
 
