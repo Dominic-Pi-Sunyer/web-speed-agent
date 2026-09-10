@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"      # 0.4.0 — the form AGENT_RELEASE_TAG uses
+      - "v[0-9]+.[0-9]+.[0-9]+"     # v0.4.0, tolerated
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Version agrees with the tag
+        id: ver
+        run: |
+          python -m pip install -q tomli
+          VERSION=$(python -c "import tomli;print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pyproject version: $VERSION"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME#v}"
+            [ "$TAG" = "$VERSION" ] || {
+              echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $VERSION"; exit 1; }
+          fi
+
+      - name: Tests
+        run: |
+          python -m pip install -q -e . pytest pytest-asyncio
+          # test_login_live.py drives a real browser against a real account —
+          # it needs credentials and a display, so it is not a CI test.
+          python -m pytest tests/test_agent.py -q
+
+      - name: Build
+        run: |
+          python -m pip install -q build
+          python -m build
+
+      # The check that would have caught the bug this workflow exists because of.
+      # install.sh runs `uv tool install web-speed-agent` from PyPI and then calls
+      # `webspeed-configure --apply`. When PyPI lagged the repo, that flag did not
+      # exist in the published wheel and the last step of the one-command install
+      # died with "unrecognized arguments: --apply". Assert the artifact actually
+      # contains what install.sh will call, rather than trusting that it does.
+      - name: Wheel contains what install.sh calls
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          whl = glob.glob("dist/*.whl")[0]
+          src = zipfile.ZipFile(whl).read("web_speed_agent/configure.py").decode()
+          missing = []
+          if '"--apply"' not in src and "'--apply'" not in src:
+              missing.append("--apply flag")
+          if "web_speed_agent.mcp_server" not in src:
+              missing.append("-m module entry point")
+          if missing:
+              sys.exit("wheel is missing: " + ", ".join(missing))
+          print(f"{whl}: --apply and -m entry both present")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write   # create the GitHub release
+      id-token: write   # PyPI Trusted Publishing (OIDC) — no token stored anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
