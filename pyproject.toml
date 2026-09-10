@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "web-speed-agent"
-version = "0.3.3"
+version = "0.4.0"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
 license = { file = "LICENSE" }
