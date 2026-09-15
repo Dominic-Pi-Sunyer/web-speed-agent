@@ -360,6 +360,8 @@ Then tell the agent:
 | `extract_page` | Get structured data from current page |
 | `click` | Click a button or link |
 | `fill_field` | Type into a form field |
+| `press_keys` | Send real keystrokes to the page (games, canvas editors, shortcuts) |
+| `wait_for_predicate` | Wait until a JS expression is truthy, instead of sleeping |
 | `submit_form` | Submit a form |
 | `close_browser` | End the browser session |
 | `account_info` | Check API credit balance |

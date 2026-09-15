@@ -272,13 +272,32 @@ Once connected, the AI can use these tools automatically — you don't need to c
 | `read_page` | Extract structured data from the current page (costs 1 credit) |
 | `click` | Click a button or link by CSS selector |
 | `fill_field` | Type into a form field. Pass `use_keyboard=True` for React/contenteditable inputs (X tweet box, Notion, Slack, etc.) |
+| `press_keys` | Send real keystrokes to the page rather than a field — for word games, canvas editors, terminals, and keyboard shortcuts that listen on `window`/`document` |
 | `submit_form` | Submit a form |
 | `get_page_info` | Get the current URL, title, and visible text |
 | `wait_for_element` | Wait for an element to appear, disappear, or change state |
+| `wait_for_predicate` | Wait until a JS expression returns truthy — the general-purpose wait, and the right replacement for a fixed sleep |
 | `wait_for_url` | Wait for the URL to change — useful after SPA navigation |
 | `evaluate` | Run JavaScript in the page (Shadow DOM, iframes, embedded data) |
 | `close_browser` | Close the tab/browser and save the session |
 | `account_info` | Check your Web Speed credit balance |
+
+### Keeping tasks fast
+
+Every tool call costs a full model round-trip, which is almost always larger
+than the thing you are waiting for. Two habits cut most of it:
+
+- **Wait inside the action, not after it.** `click` and `press_keys` take
+  `wait_for`, `wait_for_predicate` and `wait_until`, so a click-then-wait is one
+  call instead of two.
+- **Never sleep when you can watch.** `wait_ms` is a guess that is either too
+  short (flaky) or too long (slow on every action). `wait_until="dom_settled"`
+  returns the moment the DOM stops changing, and catches what `networkidle`
+  misses — animations and hydration that issue no further requests.
+
+A wait that times out does not fail the action. The click still happened, and
+the unmet wait comes back in a `warnings` list so you can see that the modal you
+expected never opened.
 
 **Credentials are stored in your system keychain** (macOS Keychain, Windows Credential Manager, Linux Secret Service) and never sent to any server.
 

@@ -26,6 +26,7 @@ Choose the right tool for the state of the task:
 | **`interpret_page`** | **Discovery** | Always use this first to "see" the page. It provides a clean API-like view of the site content. |
 | **`evaluate`** | **Action** | Use for "break-glass" logic: Canvas clicks, `execCommand` text insertion, or custom event dispatching. |
 | **`click` / `fill_field`** | **Standard Interaction** | Best for traditional websites with standard forms and buttons. |
+| **`press_keys`** | **Keyboard-Driven UI** | For apps that listen on `window`/`document` rather than an input: word games, canvas editors, terminals, keyboard shortcuts. `fill_field` cannot reach these — it fires no key events, and often there is no input to target. |
 | **`inspect_element`** | **Technical Deep-Dive** | Use when you need the exact technical metadata (ID, class, children) to build a custom automation script. |
 
 ---
@@ -35,6 +36,9 @@ Choose the right tool for the state of the task:
 ### A. The "Golden Rule" of Hydration
 Modern web apps (React, Vue, etc.) look loaded before they are interactive.
 - **Action**: `navigate`, `click`, `login`, and `submit_form` now wait for real readiness automatically (the editor/content surface, not `networkidle`, which never settles on Google apps). Only add a manual wait — via `wait_for_element` — if a follow-up action reports its target is missing.
+- **Wait inside the action.** When you do need a wait, pass `wait_for`, `wait_for_predicate` or `wait_until` to `click` / `press_keys` rather than making a separate wait call. The round-trip costs more than the wait does.
+- **Never sleep when you can watch.** `wait_ms` is a guess — too short is flaky, too long is slow on every single action. Use `wait_until="dom_settled"` (returns as soon as the DOM stops changing, and unlike `networkidle` it catches animations and hydration) or a `wait_for_predicate` expression.
+- **Read the `warnings`.** A wait that times out does not fail the action, it reports itself. If a click comes back with a warning that your `wait_for` selector never appeared, the click landed but the UI did not do what you expected — re-read the page rather than pressing on.
 - **Verification**: Never assume an action worked. Use `evaluate` or `read_page` to confirm your change landed.
 
 ### B. Google Workspace Mastery (Docs, Slides)

@@ -11,3 +11,7 @@ venv/
 ~/.webspeed/
 .pytest_cache/
 .coverage
+# Scratch git worktrees from agent sessions. Git already declines to stage a
+# nested repo, but that is a side effect, not a guarantee — name it explicitly
+# so a whole second copy of this repo can never be swept into a commit.
+.claude/worktrees/

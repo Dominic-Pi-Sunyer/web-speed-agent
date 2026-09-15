@@ -1082,6 +1082,117 @@ async def _settle(page) -> None:
         pass
 
 
+# ── post-action waits ────────────────────────────────────────────────────────
+# Waiting is cheap; asking the model whether to wait is not. A wait that needs
+# its own tool call costs a full round-trip — inference plus IPC plus JSON-RPC —
+# which dominates the wall-clock time of a multi-step task and dwarfs the wait
+# itself. So these are PARAMETERS on the action tools: click-then-wait is one
+# call, not two.
+#
+# They also exist to kill `wait_ms`. A fixed sleep is a guess, and both ways of
+# being wrong are expensive: too short is flaky, too long burns seconds on every
+# single action. A condition returns the moment it is true.
+
+_WAIT_UNTIL = ("none", "load", "domcontentloaded", "networkidle", "settle", "dom_settled")
+
+
+async def _wait_dom_settled(page, quiet_ms: int = 400, timeout_ms: int = 5_000) -> bool:
+    """Resolve once the DOM has stopped changing for `quiet_ms`.
+
+    This is the honest replacement for `wait_ms: 2000`, and it catches what
+    `networkidle` cannot: CSS animations, hydration, and client-side rendering
+    that finish without issuing another network request.
+
+    The page-side promise carries its own hard cap, so a page that mutates
+    forever — a ticking clock, a carousel, a live feed — always resolves and
+    always disconnects its observer. Without that cap this would hang on exactly
+    the pages that need it most, and leak a MutationObserver every time.
+
+    Returns True if the DOM went quiet, False if the cap was hit first. Never
+    raises: a wait that fails is worth reporting, not worth losing the page over.
+    """
+    # finish() reports WHY it resolved. Resolving true unconditionally would
+    # make a page that never stops moving indistinguishable from one that went
+    # quiet immediately — so the "still changing" warning could never fire and
+    # the caller would be told the page was ready when it wasn't.
+    js = """
+    ([quiet, cap]) => new Promise(resolve => {
+        let timer = null;
+        const hard = setTimeout(() => finish(false), cap);
+        const observer = new MutationObserver(() => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => finish(true), quiet);
+        });
+        function finish(settled) {
+            if (timer) clearTimeout(timer);
+            clearTimeout(hard);
+            observer.disconnect();
+            resolve(settled);
+        }
+        observer.observe(document.documentElement, {
+            childList: true, subtree: true, attributes: true, characterData: true,
+        });
+        timer = setTimeout(() => finish(true), quiet);
+    })
+    """
+    quiet = max(50, int(quiet_ms))
+    cap = max(int(timeout_ms), quiet + 250)
+    try:
+        return bool(await page.evaluate(js, [quiet, cap]))
+    except Exception:
+        # Navigation during the wait destroys the promise's execution context.
+        # That is a completed navigation, not a failure worth escalating.
+        return False
+
+
+async def _apply_waits(
+    page,
+    *,
+    wait_for: str | None = None,
+    wait_for_predicate: str | None = None,
+    wait_until: str = "none",
+    wait_ms: int = 0,
+    timeout_ms: int = 10_000,
+) -> list[str]:
+    """Run the requested post-action waits, in order, and report what did not happen.
+
+    Returns a list of human-readable notes for waits that timed out. Callers
+    surface these as `warnings` rather than raising: the action itself already
+    succeeded, and the agent needs to SEE that the modal never opened. Swallowing
+    it silently is what makes an agent re-explore a page it already acted on.
+    """
+    notes: list[str] = []
+
+    if wait_for:
+        try:
+            await page.wait_for_selector(wait_for, timeout=timeout_ms)
+        except Exception:
+            notes.append(f"wait_for: selector {wait_for!r} never appeared within {timeout_ms}ms")
+
+    if wait_for_predicate:
+        try:
+            await page.wait_for_function(wait_for_predicate, timeout=timeout_ms, polling=100)
+        except Exception:
+            notes.append(f"wait_for_predicate: never became truthy within {timeout_ms}ms")
+
+    if wait_until == "settle":
+        await _settle(page)
+    elif wait_until == "dom_settled":
+        if not await _wait_dom_settled(page, timeout_ms=timeout_ms):
+            notes.append(f"wait_until=dom_settled: DOM still changing after {timeout_ms}ms")
+    elif wait_until in ("load", "domcontentloaded", "networkidle"):
+        try:
+            await page.wait_for_load_state(wait_until, timeout=timeout_ms)
+        except Exception:
+            notes.append(f"wait_until={wait_until}: not reached within {timeout_ms}ms")
+
+    if wait_ms > 0:
+        import asyncio as _asyncio
+        await _asyncio.sleep(min(wait_ms, 10_000) / 1000)
+
+    return notes
+
+
 async def _dismiss_workspace_sidebars(page) -> None:
     """Best-effort close of side panels (Gemini, Help, Explore) that overlay the
     editor and swallow clicks/keystrokes. Safe: only clicks visible close buttons."""
@@ -1340,8 +1451,16 @@ async def click(
     wait_for_navigation: bool = True,
     wait_for: str | None = None,
     wait_ms: int = 0,
+    wait_for_predicate: str | None = None,
+    wait_until: str | None = None,
 ) -> str:
     """Click an element by CSS selector.
+
+    The wait arguments all run inside THIS call. Reach for them instead of
+    following a click with a separate wait tool — the extra round-trip costs far
+    more than the wait. Prefer `wait_for` / `wait_for_predicate` / `wait_until`
+    over `wait_ms`: a fixed sleep is either too short (flaky) or too long (slow),
+    while a condition returns the moment it is satisfied.
 
     Args:
         selector: CSS selector for the element to click.
@@ -1351,29 +1470,41 @@ async def click(
         wait_for: CSS selector to wait for AFTER clicking — use this when the click
                   opens a modal or triggers async UI rendering. The tool waits up to
                   5 s for the element to appear before returning.
-        wait_ms: Extra milliseconds to wait after the click before reading the page.
-                 Useful for SPAs where JS hydration takes a moment (e.g. 500–2000).
+        wait_ms: Fixed sleep after the click. Discouraged — use `wait_until` or
+                 `wait_for_predicate`, which finish as soon as the page is ready.
+        wait_for_predicate: JS expression polled (up to 5 s) until it returns
+                 truthy, e.g. "!document.querySelector('.spinner')".
+        wait_until: Readiness signal — 'dom_settled' (wait for the DOM to stop
+                 changing; the right replacement for wait_ms), 'networkidle',
+                 'load', 'domcontentloaded', 'settle', or 'none'. Defaults to the
+                 historical behaviour: settle unless `wait_for` was given.
+
+    Waits that time out do not fail the click — the click already happened. They
+    come back in a `warnings` list so you can see, for instance, that the modal
+    you expected never opened.
     """
     page = _require_page()
+    if wait_until is not None and wait_until not in _WAIT_UNTIL:
+        return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
     try:
         await page.click(selector, timeout=10_000)
 
-        if wait_for:
-            # Waiting for a specific post-click element takes priority over
-            # generic navigation waits — the element appearing IS the signal.
-            try:
-                await page.wait_for_selector(wait_for, timeout=5_000)
-            except Exception:
-                pass  # Report what we can; caller will see what's on the page
-        elif wait_for_navigation:
-            await _settle(page)
+        # An explicit wait_until wins. Otherwise keep the original contract:
+        # waiting for a specific post-click element takes priority over the
+        # generic navigation settle — the element appearing IS the signal.
+        effective = wait_until
+        if effective is None:
+            effective = "none" if wait_for else ("settle" if wait_for_navigation else "none")
 
-        if wait_ms > 0:
-            import asyncio as _asyncio
-            await _asyncio.sleep(min(wait_ms, 10_000) / 1000)
-
+        notes = await _apply_waits(
+            page, wait_for=wait_for, wait_for_predicate=wait_for_predicate,
+            wait_until=effective, wait_ms=wait_ms, timeout_ms=5_000,
+        )
         summary = await _page_summary(page)
-        return _ok({"message": f"Clicked '{selector}'", **summary})
+        out: dict[str, Any] = {"message": f"Clicked '{selector}'", **summary}
+        if notes:
+            out["warnings"] = notes
+        return _ok(out)
     except Exception as exc:
         return _err(f"Could not click '{selector}': {exc}")
 
@@ -1433,6 +1564,99 @@ async def fill_field(
         return _ok({"message": f"Filled '{selector}' ({mode} mode)"})
     except Exception as exc:
         return _err(f"Could not fill '{selector}': {exc}")
+
+
+@mcp.tool()
+async def press_keys(
+    text: str | None = None,
+    keys: list[str] | None = None,
+    selector: str | None = None,
+    delay_ms: int = 0,
+    repeat: int = 1,
+    wait_for: str | None = None,
+    wait_for_predicate: str | None = None,
+    wait_until: str = "none",
+) -> str:
+    """Send real keystrokes to the page, rather than into a form field.
+
+    `fill_field` writes into an `<input>`. This types at whatever holds keyboard
+    focus, which is what word games, canvas editors (Figma, Excalidraw),
+    terminal emulators, and keyboard-shortcut UIs actually listen to: they bind
+    `keydown`/`keyup` on `window` or `document`, so setting an input's value
+    never reaches them and there is often no input to target in the first place.
+
+    Examples:
+        press_keys(text="crane", keys=["Enter"])       # type a word, submit it
+        press_keys(keys=["ArrowDown"], repeat=3)       # move a selection
+        press_keys(keys=["Control+a", "Backspace"])    # select all, clear
+        press_keys(text="hello", selector="#chat")     # focus first, then type
+
+    Args:
+        text: Literal text to type one character at a time, firing the full
+              keydown → keypress → input → keyup sequence per character. Typed
+              BEFORE `keys`, so text="crane", keys=["Enter"] does the right thing.
+        keys: Key names pressed in order — ["Enter"], ["Escape"], ["ArrowLeft"] —
+              or chords like ["Control+a"], ["Shift+Tab"]. Playwright names:
+              Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right,
+              Home, End, PageUp, PageDown, F1–F12, and single characters.
+        selector: CSS selector to focus first. Omit to send keys to whatever
+                  already has focus — the usual case for games and canvas apps.
+        delay_ms: Milliseconds per keystroke (0–1000). 0 is fastest; use 20–80
+                  on sites that check typing cadence.
+        repeat: Press the `keys` sequence this many times (1–50). Does not
+                repeat `text`.
+        wait_for: CSS selector to wait for afterwards, in this same call.
+        wait_for_predicate: JS expression polled until truthy afterwards.
+        wait_until: Readiness signal afterwards — 'none' (default), 'dom_settled'
+                    (wait for the DOM to stop changing; prefer this over a fixed
+                    sleep), 'networkidle', 'load', 'domcontentloaded', 'settle'.
+    """
+    page = _require_page()
+    if not text and not keys:
+        return _err("Nothing to send — pass `text`, `keys`, or both.")
+    if wait_until not in _WAIT_UNTIL:
+        return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
+
+    repeat = max(1, min(int(repeat), 50))
+    delay = max(0, min(int(delay_ms), 1_000))
+
+    try:
+        if selector:
+            try:
+                await page.focus(selector, timeout=8_000)
+            except Exception as exc:
+                return _err(f"Could not focus '{selector}': {exc}")
+
+        did: list[str] = []
+        if text:
+            await page.keyboard.type(text, delay=delay)
+            did.append(f"typed {len(text)} character(s)")
+        if keys:
+            for _ in range(repeat):
+                for key in keys:
+                    try:
+                        await page.keyboard.press(key, delay=delay)
+                    except Exception as exc:
+                        # Name the offending key: a typo'd key name is by far the
+                        # likeliest failure here, and "press failed" alone leaves
+                        # the caller guessing which of five keys was wrong.
+                        return _err(
+                            f"Could not press '{key}': {exc}. Use Playwright key "
+                            f"names — Enter, Tab, Escape, ArrowUp, Control+a, etc."
+                        )
+            did.append(f"pressed {', '.join(keys)}" + (f" ×{repeat}" if repeat > 1 else ""))
+
+        notes = await _apply_waits(
+            page, wait_for=wait_for, wait_for_predicate=wait_for_predicate,
+            wait_until=wait_until, timeout_ms=5_000,
+        )
+        summary = await _page_summary(page)
+        out: dict[str, Any] = {"message": "; ".join(did), **summary}
+        if notes:
+            out["warnings"] = notes
+        return _ok(out)
+    except Exception as exc:
+        return _err(f"Key dispatch failed: {exc}")
 
 
 @mcp.tool()
@@ -1633,6 +1857,42 @@ async def wait_for_url(url_contains: str, timeout_ms: int = 10000) -> str:
         summary = await _page_summary(page)
         return _err(
             f"URL did not contain '{url_contains}' within {timeout_ms}ms. "
+            f"Current URL: {summary['url']}"
+        )
+
+
+@mcp.tool()
+async def wait_for_predicate(js: str, timeout_ms: int = 10000, poll_ms: int = 100) -> str:
+    """Wait until a JavaScript expression returns a truthy value.
+
+    The general-purpose wait, for when readiness is not "an element appeared":
+    a list reached a length, a spinner class was removed, a global got
+    populated, an animation finished.
+
+        wait_for_predicate("document.querySelectorAll('.row').length > 10")
+        wait_for_predicate("!document.querySelector('.spinner')")
+        wait_for_predicate("window.__APP_READY === true")
+
+    Always prefer this to a fixed sleep — it returns the moment the condition
+    holds, instead of costing the full delay every time. If you only need to
+    wait after a click or a keypress, pass `wait_for_predicate` to that tool
+    instead and save the extra round-trip.
+
+    Args:
+        js: JavaScript expression (or zero-argument function) re-evaluated in
+            page context until it returns truthy.
+        timeout_ms: Maximum time to wait (default 10 000).
+        poll_ms: How often to re-evaluate, in milliseconds (default 100).
+    """
+    page = _require_page()
+    try:
+        await page.wait_for_function(js, timeout=timeout_ms, polling=max(10, int(poll_ms)))
+        summary = await _page_summary(page)
+        return _ok({"message": "Predicate is now truthy", **summary})
+    except Exception as exc:
+        summary = await _page_summary(page)
+        return _err(
+            f"Predicate did not become truthy within {timeout_ms}ms: {exc}. "
             f"Current URL: {summary['url']}"
         )
 

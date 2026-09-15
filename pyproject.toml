@@ -1,19 +1,25 @@
 [build-system]
-requires = ["hatchling"]
+# Upper bound is REQUIRED to publish, not tidiness. hatchling 1.29 emits
+# Metadata-Version 2.5, and twine (package.py) overrides packaging's valid-version
+# list with its own, capped at 2.4 — so a 2.5 wheel is rejected before upload with
+# "'2.5' is not a valid metadata version". The publish job runs twine, so this
+# would fail AFTER the tag, which is the expensive moment to find out.
+# Lift once twine accepts 2.5; verify with `twine check dist/*` before doing so.
+requires = ["hatchling>=1.27,<1.29"]
 build-backend = "hatchling.build"
 
 [project]
 name = "web-speed-agent"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 keywords = ["web", "scraping", "extraction", "playwright", "ai", "agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
