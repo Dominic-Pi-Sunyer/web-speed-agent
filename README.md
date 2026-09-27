@@ -13,6 +13,12 @@ pip install web-speed-agent
 playwright install chromium
 ```
 
+> **Needs Python 3.10 or newer** (3.13 and 3.14 both work). macOS ships 3.9, so a
+> stock `pip3 install` fails with a misleading `No matching distribution found` —
+> see [troubleshooting](docs/mcp-install.md#no-matching-distribution-found-when-installing).
+> The [one-line installer](docs/mcp-install.md) avoids this by fetching a suitable
+> Python for you.
+
 > **Want to use this with Claude, Gemini, or other AI clients?**
 > 
 > Check out the **[MCP Server Installation Guide](docs/mcp-install.md)** — it's the easiest way to let AI agents log in and extract data through natural language.
@@ -77,7 +83,10 @@ Get an API key at [getwebspeed.io](https://getwebspeed.io).
 
 ## Installation
 
-**Requirements:** Python 3.10+, a Web Speed API key
+**Requirements:** Python **3.10 or newer** (no upper limit — 3.13 and 3.14 are
+verified), and a Web Speed API key. `mcp` and `playwright` both require 3.10+, so
+this floor is not ours to lower. On macOS check with `python3 --version` first:
+the system Python is 3.9.
 
 ```bash
 pip install web-speed-agent

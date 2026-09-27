@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "web-speed-agent"
-version = "0.6.0"
+version = "0.6.1"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -20,10 +20,16 @@ keywords = ["web", "scraping", "extraction", "playwright", "ai", "agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    # Keep in step with reality, and with what CI actually runs. These are shown
+    # on the PyPI page, and a list that stops short reads as an upper limit even
+    # though pip ignores classifiers entirely — which is exactly how "does it
+    # only support up to 3.12?" happened. 3.13 and 3.14 are verified working.
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]

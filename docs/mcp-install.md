@@ -320,6 +320,62 @@ process — its connectors are remote HTTPS endpoints — so:
   That needs a tunnel id and an API key created in OpenAI's own UI, so
   `--chatgpt` prints the exact `tunnel-client` command rather than running it.
 
+### "No matching distribution found" when installing
+
+If `pip install web-speed-agent` says this:
+
+```
+ERROR: Ignored the following versions that require a different python version:
+       … 0.6.1 Requires-Python >=3.10
+ERROR: Could not find a version that satisfies the requirement web-speed-agent
+       (from versions: none)
+ERROR: No matching distribution found for web-speed-agent
+```
+
+**your Python is too old — the package is fine.** `from versions: none` reads as
+though the package does not exist, which is why this is so confusing; the real
+reason is the first line, which is easy to scroll past.
+
+The Bridge needs **Python 3.10 or newer**. There is no upper limit — 3.13 and
+3.14 both work. On macOS, `/usr/bin/python3` is still **3.9.6**, so `pip3
+install` hits this on a stock machine.
+
+The requirement is not ours to relax: `mcp` and `playwright` both require 3.10+,
+so the install would fail on the dependencies even if we lowered it.
+
+Check what you have, then fix it:
+
+```bash
+python3 --version
+```
+
+**Easiest fix — use the installer**, which fetches a suitable Python for you
+regardless of what is on your system:
+
+```bash
+curl -fsSL https://api.getwebspeed.io/install.sh | sh -s -- --key wsp_YOUR_KEY
+```
+
+**Or install a newer Python** and use it explicitly:
+
+```bash
+brew install python@3.12
+python3.12 -m pip install web-speed-agent
+```
+
+Point your MCP config at that same interpreter — `webspeed-configure` does this
+for you, and refuses to write a config whose Python cannot import the package.
+
+**No admin rights?** The hosted mapping tools need no install at all, and their
+configurator runs on Python 3.9:
+
+```bash
+curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --key wsp_YOUR_KEY --hosted-only
+```
+
+You lose the local browser agent (logged-in sites), but `site_map`,
+`interpret_page` and the rest work.
+
 ### Safety controls
 
 The Bridge drives a browser holding your live logins, so the blast radius of a
