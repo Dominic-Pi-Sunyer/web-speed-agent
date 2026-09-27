@@ -37,12 +37,13 @@ jobs:
           python -m pip install -q -e . pytest pytest-asyncio
           # test_login_live.py drives a real browser against a real account —
           # it needs credentials and a display, so it is not a CI test.
-          python -m pytest tests/test_agent.py -q
+          python -m pytest tests/test_agent.py tests/test_policy.py -q --asyncio-mode=auto
           # test_keyboard_waits.py also drives a browser, but against a local
           # file with no credentials and no network, so it IS a CI test — it
           # covers the keyboard and wait behaviour that only a real DOM exercises.
           python -m playwright install --with-deps chromium
-          python -m pytest tests/test_keyboard_waits.py -q --asyncio-mode=auto
+          python -m pytest tests/test_keyboard_waits.py tests/test_input_safety.py \
+            -q --asyncio-mode=auto
 
       - name: Build
         run: |

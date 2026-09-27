@@ -33,7 +33,6 @@ import shutil
 import socket
 import sqlite3
 import stat
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -41,7 +40,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
 from web_speed_agent import Agent
 from web_speed_agent.credentials import store_pair, get_pair, delete
 
@@ -51,6 +51,40 @@ API_KEY     = os.getenv("WEBSPEED_API_KEY", "")
 SERVER_URL  = os.getenv("WEBSPEED_SERVER_URL", "https://api.getwebspeed.io")
 SESSIONS    = Path("~/.webspeed/sessions").expanduser()
 HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"  # legacy default
+
+# ── safety policy ─────────────────────────────────────────────────────────────
+# Read-only, site allow/deny lists, human confirmation and the audit log all live
+# in safety.py, configured by environment variable and nothing else — an agent
+# cannot reach any of it. See that module for why each control is shaped the way
+# it is, and which of them are boundaries rather than checkpoints.
+from web_speed_agent import safety  # noqa: E402
+
+_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _env_ms(name: str, default: int) -> int:
+    """A positive millisecond value from the environment, or the default.
+
+    Never raises on a typo: a malformed WEBSPEED_SETTLE_MS should not stop the
+    Bridge from starting, it should just fall back to the value that works.
+    """
+    try:
+        v = int(os.getenv(name, "") or default)
+        return v if v > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+# How long a page may keep changing before we stop waiting, and how long it must
+# hold still to count as settled. See _settle() for why this replaced networkidle.
+_SETTLE_MS       = _env_ms("WEBSPEED_SETTLE_MS", 1500)
+_SETTLE_QUIET_MS = _env_ms("WEBSPEED_SETTLE_QUIET_MS", 350)
+
+# Recent blocked requests, newest last. Surfaced in tool results so a blocked
+# action reads as "read-only stopped this" instead of an unexplained failure —
+# a silent block would just send the agent into a retry loop.
+_blocked_writes: list[str] = []
+_BLOCKED_KEEP = 20
 
 # ── remote config (control-panel settings) ────────────────────────────────────
 # The control panel on api.getwebspeed.io lets a user set agent defaults
@@ -381,6 +415,141 @@ def _require_page():
     if _page is None:
         raise RuntimeError("No browser open. Call open_browser first.")
     return _page
+
+
+def _readonly_refusal(action: str) -> str | None:
+    """An error to return, or None when the action may proceed.
+
+    Used by the handful of tools whose ONLY purpose is to write. The network
+    guard below would stop them anyway; refusing here just turns a confusing
+    "the page did not change" into a clear reason.
+    """
+    if not safety.READONLY:
+        return None
+    return _err(
+        f"Read-only mode: {action} is blocked. The Bridge was started with "
+        f"WEBSPEED_READONLY set, so it can browse and read but not change "
+        f"anything. Unset it in the MCP host config and restart to allow writes."
+    )
+
+
+def _readonly_note() -> dict[str, Any]:
+    """Blocked-request detail to merge into a tool result, if there is any."""
+    if not _blocked_writes:
+        return {}
+    return {"read_only_blocked": list(_blocked_writes)}
+
+
+class _Approve(BaseModel):
+    """What the human is asked. One boolean, because a confirmation prompt with
+    choices is a prompt people learn to click through."""
+    approve: bool = Field(description="Allow this action to run?")
+
+
+def _client_can_elicit(ctx: Any) -> bool:
+    """True only if the connected client declared the elicitation capability."""
+    try:
+        caps = ctx.session.client_params.capabilities
+        return getattr(caps, "elicitation", None) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _confirm(ctx: Any, tool: str, summary: str,
+                   target: str | None = None) -> str | None:
+    """Ask a human before acting. Returns an error to return, or None to proceed.
+
+    FAILS CLOSED. If no human can be reached — no Context, or a client that does
+    not implement elicitation — the action is refused rather than allowed. The
+    alternative is the worst outcome available: someone configures confirmation,
+    their client silently cannot ask, and every action runs unattended while they
+    believe each one was approved.
+    """
+    if not safety.needs_confirmation(tool, target):
+        return None
+
+    if ctx is None or not _client_can_elicit(ctx):
+        safety.audit(tool, ok=False, detail="blocked: client cannot ask a human")
+        return _err(
+            f"Confirmation required for {tool}, but this MCP client does not "
+            f"support elicitation, so nobody can be asked. Refusing rather than "
+            f"acting unattended. Either use a client that supports elicitation, "
+            f"or set WEBSPEED_CONFIRM=off (and consider WEBSPEED_READONLY=1 "
+            f"instead, which does not depend on the client)."
+        )
+
+    try:
+        result = await ctx.elicit(message=summary, schema=_Approve)
+    except Exception as exc:  # noqa: BLE001
+        safety.audit(tool, ok=False, detail=f"blocked: elicitation failed ({exc})")
+        return _err(f"Could not ask for confirmation ({exc}). Refusing {tool}.")
+
+    if getattr(result, "action", None) != "accept" or not getattr(
+            getattr(result, "data", None), "approve", False):
+        safety.audit(tool, ok=False, detail="declined by user")
+        return _err(f"Declined: a human did not approve {tool}.")
+
+    safety.audit(tool, ok=True, detail="approved by user")
+    return None
+
+
+async def _element_text(page, selector: str) -> str:
+    """The element's visible text, or "" — best effort and quick.
+
+    Used only to decide whether an action looks risky, so a miss must cost
+    nothing: a short timeout and any failure means "no label", never an error.
+    """
+    try:
+        txt = await page.locator(selector).first.inner_text(timeout=1500)
+        return " ".join((txt or "").split())[:120]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _install_readonly_guard(context) -> None:
+    """Abort requests that policy forbids — non-GET in read-only, and any host
+    outside the site lists.
+
+    Installed on the CONTEXT, so it covers popups and any tab opened later, not
+    just the page that happens to be active now.
+    """
+    if context is None or not (safety.READONLY or safety.ALLOW_SITES
+                               or safety.DENY_SITES):
+        return
+
+    async def _guard(route) -> None:
+        req = route.request
+        try:
+            if safety.READONLY and (req.method or "GET").upper() in _WRITE_METHODS:
+                _blocked_writes.append(f"{req.method} {req.url[:200]}")
+                del _blocked_writes[:-_BLOCKED_KEEP]
+                await route.abort("blockedbyclient")
+                return
+            # Site lists are re-checked HERE, not only before navigate(), because
+            # a redirect, an iframe or a script-driven navigation never passes
+            # through the tool — a check that only guards the tool is a check an
+            # ordinary link can walk around.
+            ok, _why = safety.site_allowed(req.url)
+            if not ok:
+                _blocked_writes.append(f"BLOCKED-SITE {req.url[:200]}")
+                del _blocked_writes[:-_BLOCKED_KEEP]
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
+        except Exception:  # noqa: BLE001
+            # A route can die with its page mid-navigation. Failing to continue
+            # a request must never take down the guard for every later one.
+            pass
+
+    try:
+        await context.route("**/*", _guard)
+    except Exception as exc:  # noqa: BLE001
+        # Fail LOUDLY rather than silently browsing unprotected: someone who
+        # asked for read-only must not believe they have it when they do not.
+        raise RuntimeError(
+            f"Read-only mode was requested but the request guard could not be "
+            f"installed ({exc}). Refusing to continue unprotected."
+        ) from exc
 
 def _secure_mkdir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
@@ -782,6 +951,7 @@ async def open_browser(
 
             contexts = _browser.contexts
             _context = contexts[0] if contexts else await _browser.new_context()
+            await _install_readonly_guard(_context)
             _page = await _context.new_page()
             _session_name = None
             _cdp_mode = True
@@ -832,6 +1002,7 @@ async def open_browser(
                     viewport={"width": 1920, "height": 1080},
                     extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
                 )
+                await _install_readonly_guard(_context)
                 await _context.add_init_script(_STEALTH_INIT)
 
                 # Import cookies — try bulk first, then one-by-one to skip bad entries
@@ -918,6 +1089,7 @@ async def open_browser(
                         viewport={"width": 1920, "height": 1080},
                         args=_CHROMIUM_ARGS,
                     )
+                    await _install_readonly_guard(_context)
                 except Exception as exc:
                     return _err(
                         f"Could not open {browser} with profile '{resolved}': {exc}\n\n"
@@ -1012,6 +1184,7 @@ async def open_browser(
                     ctx_opts["storage_state"] = str(storage_file)
 
             _context = await _browser.new_context(**ctx_opts)
+            await _install_readonly_guard(_context)
             await _context.add_init_script(_STEALTH_INIT)
             _page = await _context.new_page()
 
@@ -1059,12 +1232,22 @@ def _workspace_kind(url: str) -> str | None:
 
 
 async def _settle(page) -> None:
-    """Wait for the page to be interactive WITHOUT relying on networkidle.
+    """Wait for the page to be interactive, without betting on networkidle.
 
-    On Google Workspace editors, networkidle never fires (persistent
-    connections), so we wait for the editor surface to appear instead — turning a
-    guaranteed multi-second timeout into a fast, real readiness signal. Elsewhere
-    we still allow a short, capped networkidle.
+    networkidle is the wrong signal for most modern sites and the cost is not
+    subtle: anything holding a websocket, a poll or a telemetry beacon NEVER goes
+    idle, so the wait is not "until ready", it is "the full timeout, every time".
+    Measured on Google Calendar, that was ~6.4 s per navigation — 13 navigations
+    in one session spent about 80 s waiting for a condition that could not occur.
+
+    So we watch the DOM instead. `_wait_dom_settled` returns the moment mutations
+    stop, which on a static page is faster than networkidle would have been, and
+    on a chatty one returns in the quiet window rather than at the cap. Workspace
+    editors keep their own readiness selector — a real signal beats both.
+
+    Tunable if a site needs it:
+      WEBSPEED_SETTLE_MS        hard cap for the settle wait (default 1500)
+      WEBSPEED_SETTLE_QUIET_MS  how long "quiet" must last  (default 350)
     """
     try:
         await page.wait_for_load_state("domcontentloaded", timeout=10_000)
@@ -1075,11 +1258,38 @@ async def _settle(page) -> None:
             await page.wait_for_selector(_WORKSPACE_READY[_workspace_kind(page.url)], timeout=15_000)
         except Exception:
             pass
-        return  # never wait for networkidle on Workspace — it won't come
+        return  # a real readiness selector — nothing generic beats it
+
+    # Return on whichever signal arrives FIRST, capped. Neither alone is right,
+    # and picking one just moves which pages are slow:
+    #   • networkidle never fires on a site holding a socket (Calendar) — 6s, always.
+    #   • DOM-quiet never fires on a page with a ticking clock, a carousel or a
+    #     running animation, even though its network went idle immediately.
+    # Racing them means a page waits the full cap only when BOTH are genuinely
+    # unsettled, which is the case where waiting is the right thing to do anyway.
+    import asyncio as _asyncio
+
+    async def _network_idle() -> bool:
+        try:
+            await page.wait_for_load_state("networkidle", timeout=_SETTLE_MS)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    tasks = {
+        _asyncio.create_task(_network_idle()),
+        _asyncio.create_task(_wait_dom_settled(
+            page, quiet_ms=_SETTLE_QUIET_MS, timeout_ms=_SETTLE_MS)),
+    }
     try:
-        await page.wait_for_load_state("networkidle", timeout=6_000)
-    except Exception:
-        pass
+        _done, pending = await _asyncio.wait(
+            tasks, timeout=_SETTLE_MS / 1000,
+            return_when=_asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()   # the DOM watcher carries its own cap, so nothing leaks
+    except Exception:  # noqa: BLE001
+        for t in tasks:
+            t.cancel()
 
 
 # ── post-action waits ────────────────────────────────────────────────────────
@@ -1333,7 +1543,8 @@ async def _prepare_slides_input(page, placeholder: int = 0) -> bool:
 
 
 @mcp.tool()
-async def navigate(url: str, expect_url_contains: str | None = None) -> str:
+async def navigate(url: str, expect_url_contains: str | None = None,
+                   ctx: Context = None) -> str:
     """Navigate to a URL and return the page title and final URL.
 
     Always call this before interacting with a new page.
@@ -1345,6 +1556,12 @@ async def navigate(url: str, expect_url_contains: str | None = None) -> str:
                              a 'spa_redirect' warning is included in the result
                              so the agent knows to adjust its approach.
     """
+    allowed, why = safety.site_allowed(url)
+    if not allowed:
+        safety.audit("navigate", url=url, ok=False, detail="blocked by site policy")
+        return _err(why)
+    if (stop := await _confirm(ctx, "navigate", f"Open {url} ?", url)) is not None:
+        return stop
     page = _require_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -1370,6 +1587,7 @@ async def login(
     username_selector: str | None = None,
     password_selector: str | None = None,
     submit_selector: str | None = None,
+    ctx: Context = None,
 ) -> str:
     """Fill a login form and submit it.
 
@@ -1381,6 +1599,15 @@ async def login(
 
     Use navigate() to go to the login page first.
     """
+    # Refused rather than attempted: a sign-in POST would be blocked by the guard
+    # anyway, and a half-typed password sitting in a form is a worse outcome than
+    # a clear refusal. Sign in first with the mode off — the session persists, so
+    # read-only runs afterwards still reach logged-in pages.
+    if (stop := _readonly_refusal("signing in")) is not None:
+        return stop
+    safety.audit("login", url=_page.url if _page else None)
+    if (stop := await _confirm(ctx, "login", f"Sign in on {_page.url if _page else 'this page'}?")) is not None:
+        return stop
     page = _require_page()
 
     # Resolve credentials
@@ -1453,6 +1680,7 @@ async def click(
     wait_ms: int = 0,
     wait_for_predicate: str | None = None,
     wait_until: str | None = None,
+    ctx: Context = None,
 ) -> str:
     """Click an element by CSS selector.
 
@@ -1486,6 +1714,22 @@ async def click(
     page = _require_page()
     if wait_until is not None and wait_until not in _WAIT_UNTIL:
         return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
+
+    # Match on the element's own LABEL, not just the selector. "Delete account"
+    # is the signal; `button.btn-primary` carries none.
+    #
+    # Only read it when something will actually use it. In the default
+    # configuration — no confirmation, no audit — this is skipped entirely, so an
+    # ordinary click costs exactly what it did before. Reading it unconditionally
+    # added a DOM round-trip to every click, and a full timeout to every click
+    # whose selector did not match.
+    label = ""
+    if safety.CONFIRM != "off" or safety.AUDIT_PATH is not None:
+        label = await _element_text(page, selector)
+    safety.audit("click", url=page.url, selector=selector, label=label or None)
+    if (stop := await _confirm(ctx, "click", f"Click {label or selector!r} on {page.url}?",
+                               f"{selector} {label}")) is not None:
+        return stop
     try:
         await page.click(selector, timeout=10_000)
 
@@ -1501,7 +1745,8 @@ async def click(
             wait_until=effective, wait_ms=wait_ms, timeout_ms=5_000,
         )
         summary = await _page_summary(page)
-        out: dict[str, Any] = {"message": f"Clicked '{selector}'", **summary}
+        out: dict[str, Any] = {"message": f"Clicked '{selector}'", **summary,
+                               **_readonly_note()}
         if notes:
             out["warnings"] = notes
         return _ok(out)
@@ -1516,6 +1761,7 @@ async def fill_field(
     press_tab: bool = False,
     use_keyboard: bool = False,
     delay_ms: int = 0,
+    ctx: Context = None,
 ) -> str:
     """Type a value into a form field.
 
@@ -1543,6 +1789,11 @@ async def fill_field(
                   typing cadence.
     """
     page = _require_page()
+    safety.audit("fill_field", url=page.url, selector=selector, value=value)
+    if (stop := await _confirm(ctx, "fill_field",
+                               f"Type into {selector!r} on {page.url}?",
+                               selector)) is not None:
+        return stop
 
     # Strip literal \n from values — they must never appear in form inputs.
     # A trailing \n is interpreted as "advance to next field" (Tab press).
@@ -1567,6 +1818,219 @@ async def fill_field(
 
 
 @mcp.tool()
+async def hover(
+    selector: str,
+    wait_for: str | None = None,
+    wait_for_predicate: str | None = None,
+    wait_until: str = "none",
+) -> str:
+    """Move the pointer over an element, without clicking.
+
+    Whole menus exist only on hover — nav dropdowns, tooltips, the row of icons
+    that appears on a table row. A synthetic mouseover event dispatched from
+    JavaScript often will not open them, because the site listens for a trusted
+    pointer or checks `:hover` in CSS. This moves the real pointer.
+
+    Args:
+        selector: CSS selector for the element to hover.
+        wait_for: CSS selector to wait for afterwards (the menu that should open).
+        wait_for_predicate: JS expression polled until truthy afterwards.
+        wait_until: Readiness signal afterwards — 'none' (default), 'dom_settled',
+                    'networkidle', 'load', 'domcontentloaded', 'settle'.
+    """
+    page = _require_page()
+    if wait_until not in _WAIT_UNTIL:
+        return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
+    try:
+        await page.hover(selector, timeout=10_000)
+        notes = await _apply_waits(page, wait_for=wait_for,
+                                   wait_for_predicate=wait_for_predicate,
+                                   wait_until=wait_until, timeout_ms=5_000)
+        out: dict[str, Any] = {"message": f"Hovered '{selector}'",
+                               **await _page_summary(page)}
+        if notes:
+            out["warnings"] = notes
+        return _ok(out)
+    except Exception as exc:
+        return _err(f"Could not hover '{selector}': {exc}")
+
+
+@mcp.tool()
+async def scroll(
+    to: str = "down",
+    selector: str | None = None,
+    amount_px: int = 600,
+    wait_until: str = "dom_settled",
+) -> str:
+    """Scroll the page, or bring an element into view.
+
+    Needed for more than reading: infinite feeds only load the next batch once
+    you reach the bottom, and lazy images never request until they approach the
+    viewport. An element below the fold can also be genuinely unclickable.
+
+    Args:
+        to: 'down', 'up', 'top', 'bottom', or 'element' (with `selector`).
+        selector: Element to scroll into view. Implies to='element'.
+        amount_px: Pixels to scroll for 'down'/'up' (default 600).
+        wait_until: Readiness signal afterwards. Defaults to 'dom_settled', which
+                    is what makes this useful on infinite scroll — it returns once
+                    the newly loaded rows stop arriving.
+    """
+    page = _require_page()
+    if wait_until not in _WAIT_UNTIL:
+        return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
+    if selector:
+        to = "element"
+    if to not in ("down", "up", "top", "bottom", "element"):
+        return _err("Invalid `to`. Use 'down', 'up', 'top', 'bottom', or 'element'.")
+    if to == "element" and not selector:
+        return _err("to='element' needs a `selector`.")
+
+    try:
+        if to == "element":
+            await page.locator(selector).first.scroll_into_view_if_needed(timeout=10_000)
+            did = f"Scrolled '{selector}' into view"
+        elif to in ("top", "bottom"):
+            await page.evaluate(
+                "(bottom) => window.scrollTo(0, bottom ? document.body.scrollHeight : 0)",
+                to == "bottom")
+            did = f"Scrolled to {to}"
+        else:
+            px = max(1, min(int(amount_px), 20_000))
+            await page.mouse.wheel(0, px if to == "down" else -px)
+            did = f"Scrolled {to} {px}px"
+
+        notes = await _apply_waits(page, wait_until=wait_until, timeout_ms=5_000)
+        pos = await page.evaluate(
+            "() => ({y: Math.round(window.scrollY),"
+            " height: document.body ? document.body.scrollHeight : 0,"
+            " atBottom: (window.innerHeight + window.scrollY) >="
+            "           ((document.body && document.body.scrollHeight) || 0) - 2})")
+        out: dict[str, Any] = {"message": did, "scroll": pos, **await _page_summary(page)}
+        if notes:
+            out["warnings"] = notes
+        return _ok(out)
+    except Exception as exc:
+        return _err(f"Could not scroll: {exc}")
+
+
+@mcp.tool()
+async def select_option(
+    selector: str,
+    value: str | None = None,
+    label: str | None = None,
+    index: int | None = None,
+    ctx: Context = None,
+) -> str:
+    """Choose an option in a <select> dropdown.
+
+    `fill_field` cannot do this — typing into a <select> does nothing. Pick ONE
+    of value / label / index:
+
+        value  matches the option's `value` attribute (most reliable)
+        label  matches the visible text
+        index  zero-based position
+
+    Args:
+        selector: CSS selector for the <select> element.
+        value: The option's value attribute.
+        label: The option's visible text.
+        index: Zero-based option position.
+    """
+    page = _require_page()
+    given = [x for x in (value, label, index) if x is not None]
+    if len(given) != 1:
+        return _err("Pass exactly one of value, label, or index.")
+    safety.audit("select_option", url=page.url, selector=selector,
+                 value=value, label=label, index=index)
+    if (stop := await _confirm(ctx, "select_option",
+                               f"Change the dropdown {selector!r} on {page.url}?",
+                               f"{selector} {label or value or ''}")) is not None:
+        return stop
+
+    # Read the options BEFORE selecting. Playwright does not report a bad option
+    # as a miss — it retries for the whole timeout and then throws its call log,
+    # so a single wrong value costs 8 seconds and returns something unreadable.
+    # Checking first turns that into an instant answer that also says what the
+    # valid choices were, which is the difference between a caller recovering on
+    # the next call and a caller guessing again.
+    try:
+        options = await page.eval_on_selector(
+            selector,
+            "el => Array.from(el.options || []).map("
+            "  (o, i) => ({index: i, value: o.value, label: (o.label || o.text || '').trim()}))")
+    except Exception as exc:
+        return _err(f"Could not read options from '{selector}': {exc}. "
+                    f"Is it a <select> element?")
+    if not options:
+        return _err(f"'{selector}' has no <option> elements — it may not be a "
+                    f"<select>, or the options load dynamically (wait for them first).")
+
+    if value is not None:
+        match = next((o for o in options if o["value"] == value), None)
+        wanted = f"value={value!r}"
+    elif label is not None:
+        match = next((o for o in options if o["label"] == label), None)
+        wanted = f"label={label!r}"
+    else:
+        i = int(index)
+        match = next((o for o in options if o["index"] == i), None)
+        wanted = f"index={i}"
+
+    if match is None:
+        return _err(
+            f"No option with {wanted} in '{selector}'. Available: "
+            + json.dumps(options, ensure_ascii=False))
+
+    try:
+        # Select by index: it is the one criterion that cannot be ambiguous, and
+        # we have already resolved the caller's criterion to a specific option.
+        chosen = await page.select_option(selector, index=match["index"], timeout=8_000)
+        return _ok({"message": f"Selected {match['label'] or match['value']!r} in '{selector}'",
+                    "selected": chosen, "option": match, **await _page_summary(page)})
+    except Exception as exc:
+        return _err(f"Could not select in '{selector}': {exc}")
+
+
+@mcp.tool()
+async def go_back(steps: int = 1, wait_until: str = "settle") -> str:
+    """Go back in browser history.
+
+    The honest way out of a wrong turn. Re-navigating to a remembered URL is not
+    the same thing: it drops scroll position, in-page state and any POST result,
+    and on a SPA the URL you remember may not rebuild the view you were on.
+
+    Args:
+        steps: How many entries to go back (1–20).
+        wait_until: Readiness signal after the last step. Defaults to 'settle'.
+    """
+    page = _require_page()
+    if wait_until not in _WAIT_UNTIL:
+        return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
+    steps = max(1, min(int(steps), 20))
+    try:
+        moved = 0
+        for _ in range(steps):
+            # None means there was nothing further back — stop and say how far we
+            # actually got, rather than reporting a move that did not happen.
+            if await page.go_back(timeout=15_000) is None:
+                break
+            moved += 1
+        if moved == 0:
+            return _err("Nothing to go back to — this is the first page in history.")
+        notes = await _apply_waits(page, wait_until=wait_until, timeout_ms=5_000)
+        out: dict[str, Any] = {
+            "message": f"Went back {moved} page(s)" + (
+                f" (asked for {steps}, history ran out)" if moved < steps else ""),
+            **await _page_summary(page)}
+        if notes:
+            out["warnings"] = notes
+        return _ok(out)
+    except Exception as exc:
+        return _err(f"Could not go back: {exc}")
+
+
+@mcp.tool()
 async def press_keys(
     text: str | None = None,
     keys: list[str] | None = None,
@@ -1576,6 +2040,7 @@ async def press_keys(
     wait_for: str | None = None,
     wait_for_predicate: str | None = None,
     wait_until: str = "none",
+    ctx: Context = None,
 ) -> str:
     """Send real keystrokes to the page, rather than into a form field.
 
@@ -1614,6 +2079,11 @@ async def press_keys(
     page = _require_page()
     if not text and not keys:
         return _err("Nothing to send — pass `text`, `keys`, or both.")
+    _what = (text or "") + " " + " ".join(keys or [])
+    safety.audit("press_keys", url=page.url, keys=keys, text=text)
+    if (stop := await _confirm(ctx, "press_keys",
+                               f"Send keystrokes to {page.url}?", _what)) is not None:
+        return stop
     if wait_until not in _WAIT_UNTIL:
         return _err(f"Invalid wait_until '{wait_until}'. Choose from: {', '.join(_WAIT_UNTIL)}")
 
@@ -1651,7 +2121,8 @@ async def press_keys(
             wait_until=wait_until, timeout_ms=5_000,
         )
         summary = await _page_summary(page)
-        out: dict[str, Any] = {"message": "; ".join(did), **summary}
+        out: dict[str, Any] = {"message": "; ".join(did), **summary,
+                               **_readonly_note()}
         if notes:
             out["warnings"] = notes
         return _ok(out)
@@ -1660,7 +2131,8 @@ async def press_keys(
 
 
 @mcp.tool()
-async def workspace_write(text: str, target: str = "auto", verify: bool = True, placeholder: int = 0) -> str:
+async def workspace_write(text: str, target: str = "auto", verify: bool = True,
+                          placeholder: int = 0, ctx: Context = None) -> str:
     """Type text into a Google Workspace editor (Docs or Slides) reliably.
 
     Google Docs/Slides render on <canvas>, so `fill_field`/`click` can't place
@@ -1683,6 +2155,11 @@ async def workspace_write(text: str, target: str = "auto", verify: bool = True, 
         placeholder: Slides only — which text placeholder to edit (0-based, in
                      document order; 0 is typically the title).
     """
+    if (stop := _readonly_refusal("writing to a Google Workspace document")) is not None:
+        return stop
+    safety.audit("workspace_write", url=_page.url if _page else None)
+    if (stop := await _confirm(ctx, "workspace_write", f"Type into the open Google Workspace document?")) is not None:
+        return stop
     import asyncio as _asyncio
     page = _require_page()
     kind = target if target in ("docs", "slides") else _workspace_kind(page.url)
@@ -1738,13 +2215,18 @@ async def workspace_write(text: str, target: str = "auto", verify: bool = True, 
 
 
 @mcp.tool()
-async def workspace_new_slide() -> str:
+async def workspace_new_slide(ctx: Context = None) -> str:
     """Add a new slide in Google Slides (equivalent to Ctrl+M).
 
     Drops the pointer-events lock first so the toolbar is clickable, clicks the
     'New slide' button, and settles. Then call
     workspace_write(target='slides', placeholder=N) to fill the new slide.
     """
+    if (stop := _readonly_refusal("adding a slide")) is not None:
+        return stop
+    safety.audit("workspace_new_slide", url=_page.url if _page else None)
+    if (stop := await _confirm(ctx, "workspace_new_slide", f"Add a new slide to the open presentation?")) is not None:
+        return stop
     page = _require_page()
     if _workspace_kind(page.url) != "slides":
         return _err("Not on a Google Slides editor.")
@@ -1769,13 +2251,18 @@ async def workspace_new_slide() -> str:
 
 
 @mcp.tool()
-async def submit_form(selector: str | None = None) -> str:
+async def submit_form(selector: str | None = None, ctx: Context = None) -> str:
     """Submit a form by clicking a submit button or pressing Enter.
 
     Args:
         selector: CSS selector of the submit button or form. If omitted,
                   presses Enter on the focused element.
     """
+    if (stop := _readonly_refusal("submitting a form")) is not None:
+        return stop
+    safety.audit("submit_form", url=_page.url if _page else None)
+    if (stop := await _confirm(ctx, "submit_form", f"Submit the form on {_page.url if _page else 'this page'}?")) is not None:
+        return stop
     page = _require_page()
     try:
         if selector:
@@ -1784,7 +2271,8 @@ async def submit_form(selector: str | None = None) -> str:
             await page.keyboard.press("Enter")
         await _settle(page)
         summary = await _page_summary(page)
-        return _ok({"message": f"Form submitted — now on: {summary['url']}", **summary})
+        return _ok({"message": f"Form submitted — now on: {summary['url']}",
+                    **summary, **_readonly_note()})
     except Exception as exc:
         return _err(f"Submit failed: {exc}")
 
@@ -1898,7 +2386,7 @@ async def wait_for_predicate(js: str, timeout_ms: int = 10000, poll_ms: int = 10
 
 
 @mcp.tool()
-async def evaluate(js: str) -> str:
+async def evaluate(js: str, ctx: Context = None) -> str:
     """Run JavaScript in the page context and return the result.
 
     Use this to handle situations standard selectors can't reach:
@@ -1914,6 +2402,10 @@ async def evaluate(js: str) -> str:
             is better split across multiple calls.
     """
     page = _require_page()
+    safety.audit("evaluate", url=page.url, js=js[:200])
+    if (stop := await _confirm(ctx, "evaluate",
+                               f"Run JavaScript on {page.url}?", js)) is not None:
+        return stop
     try:
         result = await page.evaluate(js)
         summary = await _page_summary(page)
@@ -2006,6 +2498,42 @@ async def close_browser() -> str:
             msg += f" and session '{_session_name}' saved"
     _session_name = None
     return _ok({"message": msg, "session_saved": saved})
+
+
+@mcp.tool()
+async def safety_status() -> str:
+    """What this Bridge is currently allowed to do.
+
+    Call it first when an action is refused, or before planning anything that
+    changes data. The limits are set outside the agent and cannot be changed from
+    here — knowing them up front beats discovering them one failure at a time.
+
+    Reports read-only mode, the confirmation level, any site allow/deny lists,
+    and where the audit log is written.
+    """
+    policy = safety.describe()
+    if not safety.any_enabled():
+        return _ok({
+            "policy": policy,
+            "summary": "No restrictions. Every tool is available, nothing is "
+                       "logged, and no action will ask for approval.",
+        })
+
+    limits: list[str] = []
+    if policy["read_only"]:
+        limits.append("Read-only: nothing that changes data will reach the server "
+                      "(every non-GET request is blocked).")
+    if policy["confirm"] != "off":
+        limits.append(f"Confirmation ({policy['confirm']}): a human is asked before "
+                      f"these actions, and they are refused if nobody can be reached.")
+    if policy["allow_sites"]:
+        limits.append("Only these hosts are reachable: "
+                      + ", ".join(policy["allow_sites"]))
+    if policy["deny_sites"]:
+        limits.append("These hosts are blocked: " + ", ".join(policy["deny_sites"]))
+    if policy["audit_log"]:
+        limits.append(f"Every action is recorded to {policy['audit_log']}.")
+    return _ok({"policy": policy, "limits": limits})
 
 
 @mcp.tool()

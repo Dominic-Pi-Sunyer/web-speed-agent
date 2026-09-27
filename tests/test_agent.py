@@ -104,3 +104,47 @@ class TestBrowser:
         ctx = agent.browser(session_name="test", headless=True)
         from web_speed_agent.browser import ManagedBrowser
         assert isinstance(ctx, ManagedBrowser)
+
+
+class TestConfigureHosts:
+    """Launch-command consistency across MCP hosts.
+
+    The bug these guard against is silent: every host gets its own builder, so
+    one can drift to a different launch form and only that host breaks — with no
+    error here and no obvious link back to the configurator.
+    """
+
+    def test_agent_argv_module_form(self):
+        from web_speed_agent.configure import agent_argv
+        argv = agent_argv("/usr/bin/python3", None, use_module=True)
+        assert argv == ["/usr/bin/python3", "-m", "web_speed_agent.mcp_server"]
+
+    def test_agent_argv_shim_form(self):
+        from pathlib import Path
+        from web_speed_agent.configure import agent_argv
+        argv = agent_argv("/usr/bin/python3", Path("/x/agent_mcp_server.py"),
+                          use_module=False)
+        assert argv == ["/usr/bin/python3", "/x/agent_mcp_server.py"]
+
+    def test_every_host_launches_the_agent_identically(self):
+        from web_speed_agent.configure import (agent_argv, agent_entry,
+                                               antigravity_commands,
+                                               claude_code_commands)
+        py, key = "/usr/bin/python3", "wsp_test"
+        for use_module in (True, False):
+            path = None if use_module else __import__("pathlib").Path("/x/a.py")
+            want = agent_argv(py, path, use_module)
+
+            entry = agent_entry(key, path, py, use_module=use_module)
+            assert [entry["command"], *entry["args"]] == want
+
+            cc = claude_code_commands(key, py, False, True, path, use_module)[0]
+            assert cc[cc.index("--") + 1:] == want
+
+            ag = antigravity_commands("agy", key, py, False, True, path,
+                                      use_module)[0][1]
+            assert ag[ag.index("--") + 1:] == want
+
+    def test_module_importable_rejects_a_bogus_interpreter(self):
+        from web_speed_agent.configure import module_importable
+        assert module_importable("/nonexistent/python") is False

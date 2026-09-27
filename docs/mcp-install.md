@@ -273,6 +273,10 @@ Once connected, the AI can use these tools automatically — you don't need to c
 | `click` | Click a button or link by CSS selector |
 | `fill_field` | Type into a form field. Pass `use_keyboard=True` for React/contenteditable inputs (X tweet box, Notion, Slack, etc.) |
 | `press_keys` | Send real keystrokes to the page rather than a field — for word games, canvas editors, terminals, and keyboard shortcuts that listen on `window`/`document` |
+| `hover` | Move the pointer over an element — opens hover-only menus and tooltips |
+| `scroll` | Scroll the page or bring an element into view — needed for infinite feeds and lazy-loaded images |
+| `select_option` | Choose an option in a `<select>` (typing into one does nothing) |
+| `go_back` | Go back in browser history |
 | `submit_form` | Submit a form |
 | `get_page_info` | Get the current URL, title, and visible text |
 | `wait_for_element` | Wait for an element to appear, disappear, or change state |
@@ -280,7 +284,102 @@ Once connected, the AI can use these tools automatically — you don't need to c
 | `wait_for_url` | Wait for the URL to change — useful after SPA navigation |
 | `evaluate` | Run JavaScript in the page (Shadow DOM, iframes, embedded data) |
 | `close_browser` | Close the tab/browser and save the session |
+| `safety_status` | Report which safety controls are active (read-only, confirmation, site lists, audit log) |
 | `account_info` | Check your Web Speed credit balance |
+
+### Other MCP hosts
+
+`webspeed-configure` sets up more than Claude Desktop. One command for everything:
+
+```bash
+webspeed-configure --key wsp_YOUR_KEY --all --apply
+```
+
+| Host | How it's configured | Flag |
+|---|---|---|
+| Claude Desktop | config file (merge-safe, backed up) | default |
+| Claude Code | `claude mcp add` | `--claude-code` |
+| Antigravity CLI | `agy mcp add` | `--antigravity` |
+| ChatGPT | prints steps — see below | `--chatgpt` |
+
+The CLI hosts go through their own `mcp add` command rather than a hand-written
+file, because those tools own their config location and format. Add `--apply` to
+run the commands; without it they're printed for you to copy. `--print` is a dry
+run that changes nothing, and `--no-claude-desktop` skips the Desktop config if
+you only want the others.
+
+**ChatGPT is different and cannot be automated.** It never launches a local
+process — its connectors are remote HTTPS endpoints — so:
+
+- The **hosted** tools can be added as a custom connector in Developer mode,
+  using `https://api.getwebspeed.io/mcp?key=wsp_...`. The key goes in the URL
+  because ChatGPT connectors don't send custom headers, so treat that URL as a
+  password.
+- The **local agent** is only reachable through OpenAI's Secure MCP Tunnel,
+  which runs the stdio server on your machine and proxies it outbound-only.
+  That needs a tunnel id and an API key created in OpenAI's own UI, so
+  `--chatgpt` prints the exact `tunnel-client` command rather than running it.
+
+### Safety controls
+
+The Bridge drives a browser holding your live logins, so the blast radius of a
+bad action is *anything you are signed into*. Five controls bound it, all set as
+environment variables in your MCP host config and **off by default**:
+
+| Setting | Values | What it does |
+|---|---|---|
+| `WEBSPEED_READONLY` | `1` | Blocks every non-GET request |
+| `WEBSPEED_CONFIRM` | `off` · `writes` · `all` | Asks a human before acting |
+| `WEBSPEED_ALLOW_SITES` | `a.com,b.com` | Only these hosts are reachable |
+| `WEBSPEED_DENY_SITES` | `c.com` | Never these hosts (beats allow) |
+| `WEBSPEED_AUDIT_LOG` | `1` or a path | Records every action as JSONL |
+
+They are environment variables and not tool parameters on purpose: **an agent
+cannot turn any of them off, because nothing it can call reaches the setting.** A
+`confirm=true` argument would be theatre — the caller being restrained would hold
+the key. Ask the `safety_status` tool to see what is currently in force.
+
+Not all five are equally strong, and it matters which is which:
+
+- **Boundaries** — read-only and the site lists. Enforced at the network layer,
+  so they hold regardless of how an action was triggered.
+- **A checkpoint** — confirmation. It asks a human through MCP elicitation and
+  *fails closed*: if the client cannot ask, the action is refused rather than run
+  unattended. Its risky-word matching (`post`, `delete`, `pay`…) reads the button
+  label, so it has false negatives. Use it as a net, not a cage.
+- **Evidence** — the audit log. It prevents nothing; it makes an incident
+  reconstructible. It records field *names*, never what was typed, so it never
+  becomes a keylogger, and it is written `0600`.
+
+`WEBSPEED_CONFIRM` needs a client that implements MCP elicitation. If yours does
+not, every confirmable action is refused — prefer `WEBSPEED_READONLY`, which
+depends on nothing outside the Bridge.
+
+#### Read-only mode
+
+```json
+"env": { "WEBSPEED_API_KEY": "wsp_...", "WEBSPEED_READONLY": "1" }
+```
+
+It is set in your MCP host config, never through a tool — and that is the point.
+An agent cannot turn it off, because nothing it can call touches the setting. A
+`confirm=true` parameter would be theatre: the caller being restrained would hold
+the key.
+
+Enforcement is at the network layer, not a guess about which button looks
+dangerous. Every non-GET request is aborted before it leaves the browser, so it
+does not matter whether a write was triggered by a click, an Enter key, a form
+submit or a script — it never reaches the server. Blocked requests come back in
+the tool result, so a stopped action reads as a refusal rather than a mystery.
+
+Two honest limits:
+
+- A state-changing `GET` (`…/delete?id=5`) is **not** caught. Bad practice, still real.
+- Sites that *read* over POST (some GraphQL) will not load. That is the price of
+  a rule you can reason about — turn the mode off for those tasks.
+
+Sign in **before** enabling it: `login` is refused, but the session persists, so
+read-only runs afterwards still reach logged-in pages.
 
 ### Keeping tasks fast
 

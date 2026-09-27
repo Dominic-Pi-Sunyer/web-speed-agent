@@ -88,7 +88,11 @@ command -v webspeed-configure >/dev/null 2>&1 \
 # ── 3. write the client configs ──────────────────────────────────────────────
 say "-  Configuring your AI clients…"
 say ""
-webspeed-configure --key "$KEY" --claude-code --apply
+# --all covers every host we can configure without asking: Claude Desktop, Claude
+# Code and the Antigravity CLI, plus the ChatGPT steps (which cannot be automated
+# — ChatGPT never launches a local process). Hosts that aren't installed are
+# skipped quietly rather than dumping commands nobody asked for.
+webspeed-configure --key "$KEY" --all --apply
 
 say ""
 say "Done. Restart Claude Desktop, then ask it: \"Check my Web Speed account info\""

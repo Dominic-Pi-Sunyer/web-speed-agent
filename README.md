@@ -361,9 +361,14 @@ Then tell the agent:
 | `click` | Click a button or link |
 | `fill_field` | Type into a form field |
 | `press_keys` | Send real keystrokes to the page (games, canvas editors, shortcuts) |
+| `hover` | Open hover-only menus and tooltips |
+| `scroll` | Scroll, or bring an element into view |
+| `select_option` | Choose an option in a dropdown |
+| `go_back` | Go back in browser history |
 | `wait_for_predicate` | Wait until a JS expression is truthy, instead of sleeping |
 | `submit_form` | Submit a form |
 | `close_browser` | End the browser session |
+| `safety_status` | See which safety controls are active |
 | `account_info` | Check API credit balance |
 
 ---
