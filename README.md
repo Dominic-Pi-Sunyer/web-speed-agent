@@ -314,40 +314,44 @@ asyncio.run(scrape_inbox())
 
 The included MCP server lets Claude Desktop, Gemini CLI, and any MCP-compatible agent use the SDK directly. The agent can log in, navigate, click, and extract — all through natural language.
 
-**Start the MCP server:**
+**Install and configure (one command, Mac & Linux):**
 
 ```bash
-WEBSPEED_API_KEY="wsp_..." python3 agent_mcp_server.py
+curl -fsSL https://api.getwebspeed.io/install.sh | sh
 ```
 
-**Add to Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+It asks for your API key at a hidden prompt, stores it in your OS keychain
+(macOS Keychain / Windows Credential Manager / Linux Secret Service), and registers
+two servers with every client it finds — Claude Desktop, Claude Code, Antigravity:
+
+| Entry | Command | What it is |
+|---|---|---|
+| `webspeed` | `python -m web_speed_agent.hosted_proxy` (`webspeed-hosted`) | The hosted mapping tools, relayed to `api.getwebspeed.io` |
+| `web-speed-agent` | `python -m web_speed_agent.mcp_server` (`webspeed-agent`) | The local browser agent |
+
+**Neither entry contains your key** — both read it from the keychain at startup.
+On Windows: `py -m pip install --user web-speed-agent` then
+`py -m web_speed_agent.configure --all --apply`.
+
+**Managing the key:**
+
+```bash
+webspeed-key set       # store / replace it (prompts; never pass it as an argument)
+webspeed-key status    # which key is in use (last 4 chars) and any plaintext copies left behind
+webspeed-key delete
+```
+
+After rotating your key on the account page, run `webspeed-key set` on each
+machine and restart your AI app. No config changes.
+
+**By hand** (after `webspeed-key set`), e.g. Claude Desktop:
 
 ```json
 {
   "mcpServers": {
     "web-speed-agent": {
-      "command": "python3",
-      "args": ["/path/to/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_..."
-      }
-    }
-  }
-}
-```
-
-**Add to Gemini CLI** (`~/.gemini/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "web-speed-agent": {
-      "command": "python3.11",
-      "args": ["/path/to/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_...",
-        "PYTHONPATH": "/path/to/web-speed-agent"
-      }
+      "command": "/absolute/path/to/venv/bin/python",
+      "args": ["-m", "web_speed_agent.mcp_server"]
     }
   }
 }
@@ -542,7 +546,7 @@ except NetworkError as e:
 
 | Variable | Description |
 |----------|-------------|
-| `WEBSPEED_API_KEY` | API key (recommended over config file) |
+| `WEBSPEED_API_KEY` | API key. Overrides the keychain; use it where there is no keychain (CI, Docker, headless Linux). On a desktop, prefer `webspeed-key set`. |
 | `WEBSPEED_SERVER_URL` | Override server URL (must be `https://`) |
 
 ### Config file

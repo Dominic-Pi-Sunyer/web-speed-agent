@@ -55,11 +55,13 @@ class Config:
 
     @property
     def api_key(self) -> str | None:
-        # Env var always takes precedence — preferred way to provide key
-        return (
-            os.getenv("WEBSPEED_API_KEY")
-            or self._data.get("api", {}).get("key")
-        )
+        # Env var first (CI, Docker, explicit override), then the OS keychain
+        # (the normal desktop case — see keystore.py for why), and only then the
+        # legacy plaintext `api.key` in config.yaml, kept so existing setups do
+        # not break on upgrade.
+        from . import keystore
+        key, _source = keystore.resolve()
+        return key or self._data.get("api", {}).get("key")
 
     @property
     def server_url(self) -> str:

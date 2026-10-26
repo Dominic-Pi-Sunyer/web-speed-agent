@@ -30,10 +30,13 @@ the local agent is only reachable through OpenAI's Secure MCP Tunnel, which
 needs a tunnel id and an API key created in OpenAI's own UI.
 
 Usage:
-    webspeed-configure --key wsp_YOUR_KEY
-    webspeed-configure --key wsp_YOUR_KEY --all --apply
-    python -m web_speed_agent.configure --key wsp_YOUR_KEY
+    webspeed-configure                       # asks for your key (hidden)
+    webspeed-configure --all --apply
+    python -m web_speed_agent.configure
     WEBSPEED_API_KEY=wsp_... webspeed-configure
+
+The key is stored in the OS keychain and the configs written contain no secret
+(see keystore.py). --key still works, but leaves the key in shell history.
 
 Common options:
     --key KEY          Web Speed API key (or set WEBSPEED_API_KEY).
@@ -56,7 +59,7 @@ Common options:
 
 This file has no third-party imports on purpose, so it can also be downloaded
 on its own and run for a hosted-only setup:
-    curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --key wsp_... --hosted-only
+    curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --hosted-only   # asks for your key
 """
 from __future__ import annotations
 
@@ -69,8 +72,25 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import re
 from datetime import datetime
 from pathlib import Path
+
+# This file is also served on its own (`curl .../configure.py | python3 -`) for
+# machines that cannot install the package — no admin rights, or only the system
+# Python 3.9. Run that way it has no package around it, so the keychain modules
+# are optional: without them it falls back to writing the key into the config,
+# which is all that is possible when the keychain proxy is not installed anyway.
+try:
+    from . import keystore as _keystore
+    from .key_cli import find_plaintext_keys as _find_plaintext_keys
+    from .key_cli import verify as _verify
+except ImportError:  # standalone script
+    _keystore = None
+    _find_plaintext_keys = None
+    _verify = None
+
+_KEY_RE = re.compile(r"wsp_[A-Za-z0-9_\-]{16,}")  # same shape as keystore.KEY_RE
 
 SSE_URL = "https://api.getwebspeed.io/mcp/sse"
 # Streamable HTTP. Used by clients that speak MCP over HTTP natively (Antigravity)
@@ -116,8 +136,31 @@ def find_agent_server(explicit: str | None) -> Path | None:
 
 # ── server entries ─────────────────────────────────────────────────────────────
 
-def hosted_entry(key: str) -> dict:
-    """Claude Desktop entry for the hosted SSE server (via the mcp-remote bridge)."""
+def hosted_argv(python: str) -> list[str]:
+    """The command that launches the keychain-backed hosted proxy (webspeed-hosted).
+
+    `python -m`, for the same Windows reasons as the agent (see agent_entry): an
+    MCP host holding a package-owned .exe open breaks pip upgrades.
+    """
+    return [python, "-m", "web_speed_agent.hosted_proxy"]
+
+
+def hosted_entry(key: str | None, python: str | None = None) -> dict:
+    """Claude Desktop entry for the hosted tools.
+
+    key=None is the normal case since 0.7.0: a local stdio proxy that reads the
+    key from the OS keychain, so the config file holds no secret at all. A key is
+    passed only when there is no keychain (headless Linux, --plaintext-key), and
+    then we fall back to the old mcp-remote bridge with the key in a header.
+    """
+    if key is None:
+        argv = hosted_argv(python or sys.executable)
+        return {"command": argv[0], "args": argv[1:]}
+    return _legacy_hosted_entry(key)
+
+
+def _legacy_hosted_entry(key: str) -> dict:
+    """Pre-0.7 entry: Node mcp-remote bridge, key in plaintext in the config."""
     if platform.system() == "Windows":
         # Claude Desktop on Windows runs commands through cmd.exe, which trips on
         # the space in "C:\Program Files\". A global `npm install -g mcp-remote`
@@ -187,7 +230,7 @@ def agent_argv(python: str, agent_path: Path | None, use_module: bool) -> list[s
     return [python, str(agent_path)]
 
 
-def agent_entry(key: str, agent_path: Path | None, python: str,
+def agent_entry(key: str | None, agent_path: Path | None, python: str,
                 use_module: bool = True) -> dict:
     """Claude Desktop entry for the local browser agent (stdio).
 
@@ -211,11 +254,12 @@ def agent_entry(key: str, agent_path: Path | None, python: str,
     # so it is guaranteed to be the one that can import the package — and pip
     # never needs to replace python.exe, so upgrades stop fighting the MCP host.
     argv = agent_argv(python, agent_path, use_module)
-    return {
-        "command": argv[0],
-        "args": argv[1:],
-        "env": {"WEBSPEED_API_KEY": key},
-    }
+    entry: dict = {"command": argv[0], "args": argv[1:]}
+    if key is not None:
+        # Only without a keychain. With one, the agent reads the key itself and
+        # the config file carries no secret.
+        entry["env"] = {"WEBSPEED_API_KEY": key}
+    return entry
 
 
 # ── config read / write ────────────────────────────────────────────────────────
@@ -254,10 +298,20 @@ def _lock_down(path: Path) -> None:
 
 
 def backup(path: Path) -> Path:
+    """Copy the config aside before rewriting it — with Web Speed keys redacted.
+
+    A backup is for rolling back the config's STRUCTURE if a rewrite goes wrong.
+    Before 0.7.0 each run left a full copy of the key next to the config, which
+    multiplied every plaintext copy we are now trying to remove. Restoring one
+    gives you an entry with a placeholder key; `webspeed-key set` fixes that.
+    """
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = path.with_name(path.name + f".bak-{stamp}")
-    shutil.copy2(path, dest)
-    _lock_down(dest)  # the backup may contain the API key / other MCP secrets
+    text = path.read_text(encoding="utf-8", errors="replace")
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(_KEY_RE.sub("wsp_REDACTED", text))
+    _lock_down(dest)  # other MCP servers' secrets may still be in it
     return dest
 
 
@@ -274,23 +328,33 @@ def atomic_write(path: Path, data: dict) -> None:
 
 # ── claude code helper ─────────────────────────────────────────────────────────
 
-def claude_code_commands(key: str, python: str, do_hosted: bool, do_agent: bool,
+def claude_code_commands(key: str | None, python: str, do_hosted: bool, do_agent: bool,
                          agent_path: Path | None = None,
                          use_module: bool = True) -> list[list[str]]:
     """The `claude mcp add` invocations, as argv lists so they can be run as well
-    as printed."""
+    as printed. key=None: keychain mode, no secret in any argument.
+
+    `-s user` so the servers are available in every project. Without a scope,
+    `claude mcp add` registers them for the directory it happened to run in —
+    for install.sh, wherever the user's terminal was.
+    """
     cmds: list[list[str]] = []
     if do_hosted:
-        cmds.append(["claude", "mcp", "add", HOSTED_NAME, "--transport", "sse",
-                     "--url", SSE_URL, "--header", f"X-Web-Speed-Key: {key}"])
+        if key is None:
+            cmds.append(["claude", "mcp", "add", "-s", "user", HOSTED_NAME,
+                         "--", *hosted_argv(python)])
+        else:
+            cmds.append(["claude", "mcp", "add", "-s", "user", HOSTED_NAME,
+                         "--transport", "sse", "--url", SSE_URL,
+                         "--header", f"X-Web-Speed-Key: {key}"])
     if do_agent:
         # Launch form comes from agent_argv(), matching agent_entry() exactly — NOT
         # a hardcoded path to agent_mcp_server.py. Two bugs lived in the old form:
         # a pip or uv install has no such file, so the command it printed could not
         # run; and it was emitted only when a checkout happened to be found, so the
         # very users this is aimed at got no agent command at all.
-        cmds.append(["claude", "mcp", "add", AGENT_NAME,
-                     "--env", f"WEBSPEED_API_KEY={key}",
+        env = [] if key is None else ["--env", f"WEBSPEED_API_KEY={key}"]
+        cmds.append(["claude", "mcp", "add", "-s", "user", AGENT_NAME, *env,
                      "--", *agent_argv(python, agent_path, use_module)])
     return cmds
 
@@ -317,7 +381,16 @@ def apply_claude_code(key: str, python: str, do_hosted: bool, do_agent: bool,
     print("\nConfiguring Claude Code:")
     for cmd in claude_code_commands(key, python, do_hosted, do_agent,
                                     agent_path, use_module):
-        name = cmd[3]
+        name = cmd[cmd.index("user") + 1]
+        # `claude mcp add` refuses a name that already exists, so on its own it
+        # would leave a pre-0.7 entry — key in plaintext — exactly where it was.
+        # Remove from both scopes an older run might have used, then add fresh.
+        for scope in ("user", "local"):
+            try:
+                subprocess.run(["claude", "mcp", "remove", "-s", scope, name],
+                               capture_output=True, text=True, timeout=60)
+            except Exception:  # noqa: BLE001 — absent is the common case
+                pass
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         except Exception as exc:  # noqa: BLE001
@@ -352,7 +425,7 @@ def find_agy() -> str | None:
     return shutil.which("agy")
 
 
-def antigravity_commands(agy: str, key: str, python: str,
+def antigravity_commands(agy: str, key: str | None, python: str,
                          do_hosted: bool, do_agent: bool,
                          agent_path: Path | None = None,
                          use_module: bool = True) -> list[tuple[str, list[str]]]:
@@ -367,13 +440,19 @@ def antigravity_commands(agy: str, key: str, python: str,
         # Native HTTP — no npx/mcp-remote bridge. Antigravity speaks MCP over HTTP
         # directly, so routing it through a Node proxy would add a dependency and a
         # failure mode for nothing.
-        cmds.append((HOSTED_NAME,
-                     [agy, "mcp", "add", "--header", f"X-Web-Speed-Key: {key}",
-                      HOSTED_NAME, MCP_URL]))
+        if key is None:
+            # Keychain mode: the local proxy holds the key, so the stdio command
+            # replaces the native-HTTP entry (which needed the key in a header).
+            cmds.append((HOSTED_NAME,
+                         [agy, "mcp", "add", HOSTED_NAME, "--", *hosted_argv(python)]))
+        else:
+            cmds.append((HOSTED_NAME,
+                         [agy, "mcp", "add", "--header", f"X-Web-Speed-Key: {key}",
+                          HOSTED_NAME, MCP_URL]))
     if do_agent:
+        env = [] if key is None else ["--env", f"WEBSPEED_API_KEY={key}"]
         cmds.append((AGENT_NAME,
-                     [agy, "mcp", "add", "--env", f"WEBSPEED_API_KEY={key}",
-                      AGENT_NAME, "--",
+                     [agy, "mcp", "add", *env, AGENT_NAME, "--",
                       *agent_argv(python, agent_path, use_module)]))
     return cmds
 
@@ -421,7 +500,7 @@ def apply_antigravity(key: str, python: str, do_hosted: bool, do_agent: bool,
 
 # ── chatgpt helper ─────────────────────────────────────────────────────────────
 
-def print_chatgpt(key: str, python: str, do_hosted: bool, do_agent: bool,
+def print_chatgpt(key: str | None, python: str, do_hosted: bool, do_agent: bool,
                   agent_path: Path | None = None,
                   use_module: bool = True) -> None:
     """Instructions, not automation — and deliberately so.
@@ -441,7 +520,9 @@ def print_chatgpt(key: str, python: str, do_hosted: bool, do_agent: bool,
     if do_hosted:
         print("\n1. Hosted mapping tools — add as a custom connector:")
         print("     Settings -> Connectors -> Advanced -> Developer mode, then Create")
-        print(f"     URL:  {MCP_URL}?key={key}")
+        # Placeholder, not the key: this text lands in terminal scrollback and in
+        # the install log people paste into support threads.
+        print(f"     URL:  {MCP_URL}?key=YOUR_KEY   (paste your key in place of YOUR_KEY)")
         print("   The key travels in the URL because ChatGPT connectors do not send")
         print("   custom headers. Treat that URL as a password, and rotate the key if")
         print("   it leaks. (Not yet verified end to end against ChatGPT.)")
@@ -453,12 +534,26 @@ def print_chatgpt(key: str, python: str, do_hosted: bool, do_agent: bool,
         print("     a. platform.openai.com -> Tunnels -> create one, copy its tunnel_id")
         print("     b. Download `tunnel-client` from that same page")
         print("     c. Run:")
-        print(f"          export WEBSPEED_API_KEY={key}")
+        if key is not None:
+            print("          export WEBSPEED_API_KEY=YOUR_KEY")
         print(f"          tunnel-client init --tunnel-id <TUNNEL_ID> \\")
         print(f"              --mcp-command \"{shlex.join(agent_argv(python, agent_path, use_module))}\"")
         print(f"          tunnel-client run --profile default")
         print("   Needs an OpenAI API key with Tunnels Read + Use. The tunnel must")
         print("   stay running for the tools to be reachable.")
+
+
+def _can_prompt() -> bool:
+    """Is there a keyboard to ask? True for a terminal even when stdin is a pipe."""
+    if sys.stdin.isatty():
+        return True
+    if os.name == "nt":
+        return False
+    try:
+        with open("/dev/tty"):
+            return True
+    except OSError:  # no controlling terminal: cron, CI, a desktop app
+        return False
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -467,8 +562,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="webspeed-configure",
         description="Add Web Speed to Claude Desktop's config (merge-safe).")
-    ap.add_argument("--key", default=os.environ.get("WEBSPEED_API_KEY", ""),
-                    help="Web Speed API key (or set WEBSPEED_API_KEY).")
+    ap.add_argument("--key", default="",
+                    help="Web Speed API key. Prefer leaving this out: you'll be "
+                         "prompted (hidden), and a key typed here stays in your "
+                         "shell history. WEBSPEED_API_KEY in the environment also works.")
+    ap.add_argument("--plaintext-key", action="store_true",
+                    help="Write the key into the client configs instead of the OS "
+                         "keychain (the pre-0.7 behaviour). Only for machines with "
+                         "no keychain; it is chosen automatically there.")
     ap.add_argument("--hosted-only", action="store_true",
                     help="Configure only the hosted MCP.")
     ap.add_argument("--agent-only", action="store_true",
@@ -505,31 +606,81 @@ def main(argv: list[str] | None = None) -> int:
         print("x  --hosted-only and --agent-only are mutually exclusive.")
         return 2
 
-    key = args.key.strip()
+    # ── the key, and where it will live ─────────────────────────────────────
+    keystore = _keystore
+    use_keychain = (keystore is not None and keystore.available()
+                    and not args.plaintext_key)
+    if keystore is None:
+        print("-  Running as a standalone script (web-speed-agent isn't installed), so "
+              "the key\n   will be written into the client config. Install the "
+              "package to keep it in\n   your system keychain instead.")
+    if args.key:
+        print("!  --key leaves your key in your shell history. Next time, omit it "
+              "and paste the key when prompted.")
+    key = (args.key or os.environ.get("WEBSPEED_API_KEY", "")).strip()
+    from_keychain = False
+    if not key and use_keychain:
+        key = keystore.get() or ""
+        from_keychain = bool(key)
+    if not key and _can_prompt() and not args.dry_run:
+        import getpass
+        # getpass reads the controlling terminal (/dev/tty), not stdin — which is
+        # what makes `curl .../configure.py | python3 -` work: there stdin IS the
+        # script, but the keyboard is still reachable.
+        key = getpass.getpass("Paste your Web Speed API key (input hidden): ").strip()
     if not key:
-        print("x  No API key. Pass --key wsp_... or set WEBSPEED_API_KEY.")
-        print("   Get a key at https://getwebspeed.io")
+        print("x  No API key. Run again and paste it when prompted, or run "
+              "`webspeed-key set` first.")
+        print("   Your key: https://api.getwebspeed.io/account")
         return 2
     if not key.startswith("wsp_"):
-        print("!  That key doesn't look like a Web Speed key (expected 'wsp_...'). "
-              "Continuing anyway.")
+        print("x  That doesn't look like a Web Speed key (they start with 'wsp_').")
+        return 2
+
+    if not from_keychain and not args.dry_run and _verify is not None:
+        ok = _verify(key)
+        if ok is False:
+            print("x  Web Speed rejected that key. Nothing was changed.\n"
+                  "   Check you copied it in full, or get your current key at "
+                  "https://api.getwebspeed.io/account")
+            return 1
+
+    if use_keychain:
+        if not from_keychain and not args.dry_run:
+            keystore.set(key)
+            print(f"OK Saved {keystore.mask(key)} to your system keychain.")
+        elif from_keychain:
+            print(f"-  Using {keystore.mask(key)} from your system keychain.")
+    elif not args.plaintext_key and keystore is not None:
+        print("!  No system keychain on this machine, so the key will be written "
+              "into the client\n   configs in plaintext (owner-only files). On a "
+              "desktop, install a keychain\n   backend and re-run to move it out.")
+    # What goes INTO the configs: nothing in keychain mode.
+    entry_key: str | None = None if use_keychain else key
 
     do_hosted = not args.agent_only
     do_agent = not args.hosted_only
 
+    # Does `--python -m web_speed_agent...` actually resolve from an arbitrary
+    # directory? Asked of the interpreter that will really run it, from a neutral
+    # cwd — see module_importable(). The old in-process import answered "yes" for
+    # any checkout and wrote a config the MCP host could not launch.
+    use_module = module_importable(args.python)
+
     entries: dict[str, dict] = {}
     if do_hosted:
-        entries[HOSTED_NAME] = hosted_entry(key)
+        if entry_key is None and not use_module:
+            # The keychain proxy is part of the installed package; a bare checkout
+            # cannot launch it. Fall back to the bridge for this one entry.
+            print("!  Hosted tools use the old mcp-remote bridge (key in the "
+                  "config) because\n   web_speed_agent isn't installed into "
+                  f"{args.python}. `pip install web-speed-agent` fixes that.")
+            entries[HOSTED_NAME] = hosted_entry(key)
+        else:
+            entries[HOSTED_NAME] = hosted_entry(entry_key, args.python)
 
     agent_path: Path | None = None
-    use_module = True
     if do_agent:
-        # Does `--python -m web_speed_agent.mcp_server` actually resolve from an
-        # arbitrary directory? Asked of the interpreter that will really run it,
-        # from a neutral cwd — see module_importable(). The old in-process import
-        # answered "yes" for any checkout and wrote a config the MCP host could
-        # not launch.
-        use_module = module_importable(args.python)
         agent_path = find_agent_server(args.agent_path)
         if not use_module and agent_path is None:
             print("!  Local agent skipped — it isn't installed into "
@@ -547,7 +698,7 @@ def main(argv: list[str] | None = None) -> int:
                       f"     {agent_path}\n"
                       f"   That works, but moving or deleting that folder breaks "
                       f"it. `pip install web-speed-agent` gives a sturdier setup.")
-            entries[AGENT_NAME] = agent_entry(key, agent_path, args.python,
+            entries[AGENT_NAME] = agent_entry(entry_key, agent_path, args.python,
                                               use_module=use_module)
 
     if not entries:
@@ -573,12 +724,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"# Dry run — would write to: {cfg_path}\n")
         print(json.dumps(config, indent=2))
         if args.claude_code:
-            print_claude_code(key, agent_path, args.python, do_hosted, do_agent, use_module)
+            print_claude_code(entry_key, agent_path, args.python, do_hosted, do_agent, use_module)
         if args.antigravity:
-            print_antigravity(find_agy(), key, args.python, do_hosted, do_agent,
+            print_antigravity(find_agy(), entry_key, args.python, do_hosted, do_agent,
                               agent_path, use_module)
         if args.chatgpt:
-            print_chatgpt(key, args.python, do_hosted, do_agent, agent_path, use_module)
+            print_chatgpt(entry_key, args.python, do_hosted, do_agent, agent_path, use_module)
         return 0
 
     if not args.no_desktop:
@@ -599,7 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         # upgrade) is invisible until the host relaunches it.
         print(f"  {step}. Fully quit Claude Desktop (Cmd/Ctrl+Q) and reopen it.")
         step += 1
-    if do_hosted and not args.no_desktop:
+    if do_hosted and not args.no_desktop and entries[HOSTED_NAME].get("command") in ("npx", "mcp-remote"):
         if platform.system() == "Windows":
             print(f"  {step}. (Windows) Install the bridge once:  "
                   f"npm install -g mcp-remote@latest")
@@ -637,18 +788,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.claude_code:
         # --apply runs them; without it, or when the CLI isn't installed, fall back
         # to printing so the user still has something to copy.
-        if not (args.apply and apply_claude_code(key, args.python, do_hosted, do_agent,
+        if not (args.apply and apply_claude_code(entry_key, args.python, do_hosted, do_agent,
                                                  agent_path, use_module)):
             if sweeping:
                 print("\n-  Claude Code not installed — skipped.")
             else:
                 if args.apply:
                     print("\n!  `claude` CLI not found — printing the commands instead.")
-                print_claude_code(key, agent_path, args.python, do_hosted, do_agent,
+                print_claude_code(entry_key, agent_path, args.python, do_hosted, do_agent,
                                   use_module)
 
     if args.antigravity:
-        if not (args.apply and apply_antigravity(key, args.python, do_hosted, do_agent,
+        if not (args.apply and apply_antigravity(entry_key, args.python, do_hosted, do_agent,
                                                  agent_path, use_module)):
             if sweeping:
                 print("-  Antigravity CLI not installed — skipped.")
@@ -656,11 +807,22 @@ def main(argv: list[str] | None = None) -> int:
                 if args.apply:
                     print("\n!  `agy` not found (looked in ~/.local/bin and on PATH) — "
                           "printing the commands instead.")
-                print_antigravity(find_agy(), key, args.python, do_hosted, do_agent,
+                print_antigravity(find_agy(), entry_key, args.python, do_hosted, do_agent,
                                   agent_path, use_module)
 
     if args.chatgpt:
-        print_chatgpt(key, args.python, do_hosted, do_agent, agent_path, use_module)
+        print_chatgpt(entry_key, args.python, do_hosted, do_agent, agent_path, use_module)
+
+    if use_keychain:
+        leftovers = _find_plaintext_keys()
+        if leftovers:
+            print("\n!  Plaintext Web Speed keys remain in these files (from earlier "
+                  "installs or\n   clients this tool doesn't manage):")
+            for path, n in leftovers:
+                print(f"     {path}  ({n})")
+            print("   Remove the key from them, delete old *.bak-* files once "
+                  "everything works,\n   and rotate your key if any of them were "
+                  "ever shared, synced or committed.")
 
     return 0
 

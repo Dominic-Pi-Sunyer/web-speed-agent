@@ -13,7 +13,8 @@ Add to Claude Desktop (~/.claude/claude_desktop_config.json):
         "web-speed-agent": {
           "command": "python3.11",
           "args": ["/path/to/agent_mcp_server.py"],
-          "env": { "WEBSPEED_API_KEY": "wsp_..." }
+          (no "env" needed: the key is read from the OS keychain —
+           run `webspeed-key set` once)
         }
       }
     }
@@ -47,7 +48,10 @@ from web_speed_agent.credentials import store_pair, get_pair, delete
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-API_KEY     = os.getenv("WEBSPEED_API_KEY", "")
+# Env var first, then the OS keychain. Before 0.7.0 this read only the env var,
+# which forced the key into plaintext in every MCP client config file.
+from web_speed_agent import keystore as _keystore  # noqa: E402
+API_KEY     = _keystore.resolve()[0] or ""
 SERVER_URL  = os.getenv("WEBSPEED_SERVER_URL", "https://api.getwebspeed.io")
 SESSIONS    = Path("~/.webspeed/sessions").expanduser()
 HEADLESS    = os.getenv("WEBSPEED_HEADLESS", "false").lower() != "false"  # legacy default
@@ -1659,7 +1663,7 @@ async def read_page(page_type: str = "auto") -> str:
     """
     page = _require_page()
     if not API_KEY:
-        return _err("WEBSPEED_API_KEY not set. Set it as an env var or pass to the server.")
+        return _err(_keystore.MISSING_HELP)
 
     try:
         html = await page.content()
@@ -2540,7 +2544,7 @@ async def safety_status() -> str:
 async def account_info() -> str:
     """Check your Web Speed API credit balance and account status."""
     if not API_KEY:
-        return _err("WEBSPEED_API_KEY not set.")
+        return _err(_keystore.MISSING_HELP)
     try:
         async with Agent(api_key=API_KEY, server_url=SERVER_URL) as agent:
             info = await agent.account()

@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "web-speed-agent"
-version = "0.6.1"
+version = "0.7.0"
 description = "Local browser automation + Web Speed API integration for authenticated web extraction"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -61,6 +61,8 @@ dev = [
 [project.scripts]
 webspeed-agent = "web_speed_agent.mcp_server:main"
 webspeed-configure = "web_speed_agent.configure:main"
+webspeed-hosted = "web_speed_agent.hosted_proxy:main"
+webspeed-key = "web_speed_agent.key_cli:main"
 
 [project.urls]
 Homepage = "https://getwebspeed.io"

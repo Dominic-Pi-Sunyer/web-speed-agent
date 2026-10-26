@@ -7,6 +7,34 @@ The Web Speed Agent MCP server lets Claude, Gemini, and any MCP-compatible AI cl
 
 ---
 
+## Where your API key lives
+
+**In your operating system's keychain — not in any config file.** Since 0.7.0 the
+installer and `webspeed-configure` ask for your key at a hidden prompt and store it
+in the macOS Keychain, Windows Credential Manager, or the Secret Service on Linux
+desktops. The MCP entries they write contain no secret at all; the agent and the
+hosted-tools proxy (`webspeed-hosted`) read the key from the keychain when they start.
+
+Before, the key sat in plaintext in `claude_desktop_config.json`, `~/.claude.json`
+and the Antigravity config. Those files are owner-only, but any code running as you
+could read them — an npm install script, an editor extension, a compromised
+dependency — and they get swept into backups, synced folders and screen shares.
+
+```bash
+webspeed-key set       # store or replace your key (prompts; input hidden)
+webspeed-key status    # which key is in use (last 4 chars) + any plaintext copies left behind
+webspeed-key delete    # remove it
+```
+
+**Rotated your key?** Run `webspeed-key set` on each machine and restart your AI
+app. Nothing in any config needs to change.
+
+**No keychain** (headless Linux, containers, CI)? Set `WEBSPEED_API_KEY` in the
+environment instead. The environment variable always takes precedence over the
+keychain, so it also works as an explicit override.
+
+---
+
 ## What you can do once it's set up
 
 Tell your AI assistant things like:
@@ -110,6 +138,8 @@ Download `agent_mcp_server.py` from the repository and save it somewhere permane
 
 Pick the client you use. You only need to do one.
 
+**First, store your key once:** `webspeed-key set` (it prompts; input hidden). None of the entries below contain the key — the server reads it from your keychain.
+
 ---
 
 ### Claude Desktop
@@ -127,10 +157,7 @@ If you created a virtual environment (recommended), use the Python from inside i
   "mcpServers": {
     "web-speed-agent": {
       "command": "/Users/yourname/web-speed-agent-env/bin/python",
-      "args": ["/Users/yourname/tools/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_your_key_here"
-      }
+      "args": ["/Users/yourname/tools/agent_mcp_server.py"]
     }
   }
 }
@@ -145,10 +172,7 @@ Don't use `python` or `python3` — use the **full path** to the Python executab
   "mcpServers": {
     "web-speed-agent": {
       "command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe",
-      "args": ["D:/Web Speed testing/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_your_key_here"
-      }
+      "args": ["D:/Web Speed testing/agent_mcp_server.py"]
     }
   }
 }
@@ -172,19 +196,9 @@ claude mcp add web-speed-agent python3 /Users/yourname/tools/agent_mcp_server.py
 claude mcp add web-speed-agent "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe" "C:/Users/YourName/tools/agent_mcp_server.py"
 ```
 
-Then set your API key. Add this to your shell profile (`~/.zshrc`, `~/.bashrc`) on Mac/Linux, or set it as a Windows environment variable:
-
-**macOS / Linux:**
-```bash
-export WEBSPEED_API_KEY="wsp_your_key_here"
-```
-
-**Windows (Command Prompt):**
-```batch
-setx WEBSPEED_API_KEY "wsp_your_key_here"
-```
-
-Restart your terminal for the variable to take effect.
+Then store your key once with `webspeed-key set` (it prompts; input hidden). The
+server reads it from your system keychain, so it never goes in your shell profile
+or a config file.
 
 ---
 
@@ -215,16 +229,13 @@ Paste the configuration below, then press `Ctrl+O`, Enter, `Ctrl+X` to save.
   "mcpServers": {
     "web-speed-agent": {
       "command": "/Users/yourname/web-speed-agent-env/bin/python",
-      "args": ["/Users/yourname/tools/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_your_key_here"
-      }
+      "args": ["/Users/yourname/tools/agent_mcp_server.py"]
     }
   }
 }
 ```
 
-Replace `yourname` with your macOS username (find it with `whoami`) and `wsp_your_key_here` with your API key.
+Replace `yourname` with your macOS username (find it with `whoami`).
 
 **Windows:**
 
@@ -235,10 +246,7 @@ Open `%APPDATA%\.gemini\settings.json` (press `Win+R`, paste the path). Add:
   "mcpServers": {
     "web-speed-agent": {
       "command": "C:/Users/YourName/AppData/Local/Programs/Python/Python313/python.exe",
-      "args": ["C:/Users/YourName/tools/agent_mcp_server.py"],
-      "env": {
-        "WEBSPEED_API_KEY": "wsp_your_key_here"
-      }
+      "args": ["C:/Users/YourName/tools/agent_mcp_server.py"]
     }
   }
 }
@@ -292,7 +300,7 @@ Once connected, the AI can use these tools automatically — you don't need to c
 `webspeed-configure` sets up more than Claude Desktop. One command for everything:
 
 ```bash
-webspeed-configure --key wsp_YOUR_KEY --all --apply
+webspeed-configure --all --apply    # asks for your key
 ```
 
 | Host | How it's configured | Flag |
@@ -312,9 +320,9 @@ you only want the others.
 process — its connectors are remote HTTPS endpoints — so:
 
 - The **hosted** tools can be added as a custom connector in Developer mode,
-  using `https://api.getwebspeed.io/mcp?key=wsp_...`. The key goes in the URL
+  using `https://api.getwebspeed.io/mcp?key=YOUR_KEY`. The key goes in the URL
   because ChatGPT connectors don't send custom headers, so treat that URL as a
-  password.
+  password. (It is stored in ChatGPT's settings, not in a file on your computer.)
 - The **local agent** is only reachable through OpenAI's Secure MCP Tunnel,
   which runs the stdio server on your machine and proxies it outbound-only.
   That needs a tunnel id and an API key created in OpenAI's own UI, so
@@ -353,7 +361,7 @@ python3 --version
 regardless of what is on your system:
 
 ```bash
-curl -fsSL https://api.getwebspeed.io/install.sh | sh -s -- --key wsp_YOUR_KEY
+curl -fsSL https://api.getwebspeed.io/install.sh | sh    # asks for your key
 ```
 
 **Or install a newer Python** and use it explicitly:
@@ -370,11 +378,13 @@ for you, and refuses to write a config whose Python cannot import the package.
 configurator runs on Python 3.9:
 
 ```bash
-curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --key wsp_YOUR_KEY --hosted-only
+curl -fsSL https://api.getwebspeed.io/configure.py | python3 - --hosted-only    # asks for your key
 ```
 
 You lose the local browser agent (logged-in sites), but `site_map`,
-`interpret_page` and the rest work.
+`interpret_page` and the rest work. Without the package there is no keychain
+proxy, so this route writes the key into the client config — install the package
+when you can to move it out.
 
 ### Safety controls
 
@@ -414,7 +424,7 @@ depends on nothing outside the Bridge.
 #### Read-only mode
 
 ```json
-"env": { "WEBSPEED_API_KEY": "wsp_...", "WEBSPEED_READONLY": "1" }
+"env": { "WEBSPEED_READONLY": "1" }
 ```
 
 It is set in your MCP host config, never through a tool — and that is the point.
@@ -897,14 +907,20 @@ open_browser(browser="firefox", profile_path="~/Library/Application Support/Fire
 
 ---
 
-**"WEBSPEED_API_KEY not set"**
-The key must be in the `env` block of your config file — Claude Desktop and Gemini CLI don't inherit variables from your terminal session.
+**"No Web Speed API key on this machine"**
+Run `webspeed-key set`, paste your key, and restart your AI app. Desktop apps don't
+inherit variables from your terminal session, which is why the key lives in the
+keychain rather than in `export WEBSPEED_API_KEY=...`.
+
+**"Web Speed rejected the API key stored on this machine"**
+The key was rotated or revoked. Run `webspeed-key set` with your current key.
 
 ---
 
 ## Keeping credentials safe
 
 - Login passwords live in the system keychain only — never written to files, never sent to any server
-- Your API key is the only credential that leaves your machine (sent over HTTPS to `api.getwebspeed.io`)
+- Your API key is stored in the system keychain, never in a config file, and is the only credential that leaves your machine (sent over HTTPS to `api.getwebspeed.io`)
+- `webspeed-key status` finds plaintext copies an older install left behind (including old `*.bak-*` config backups)
 - Browser session cookies are stored in `~/.webspeed/sessions/` with owner-only permissions
 - Revoke your API key at any time from [getwebspeed.io/account](https://getwebspeed.io/account)
